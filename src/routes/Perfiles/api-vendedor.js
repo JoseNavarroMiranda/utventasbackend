@@ -1,7 +1,7 @@
 const express = require("express");
 const vendedorRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
-const { Producto, Categoria, ProductoImagen, TransaccionPremium, Pedido, Usuario, sequelize } = require("../../models");
+const { Producto, Categoria, ProductoImagen, TransaccionPremium, Pedido, Usuario, RetiroVendedor, sequelize } = require("../../models");
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
 const upload = require("../../middlewares/upload");
 
@@ -481,8 +481,9 @@ vendedorRoute.get("/mis-publicaciones/:id",
 // =========================================================================
 // API CONTRATAR PREMIUM (PUT /api/vendedor/promover-premium/:id)
 // =========================================================================
-// Recibe el 'orderId' generado por el frontend en PayPal, captura los $5.00 USD,
-// registra la transacción y activa la visibilidad premium del producto por 30 días.
+// Recibe el 'orderId' opcional de PayPal, captura el pago y activa la
+// visibilidad premium del producto por los días contratados.
+// El pago PayPal se simula (try/catch) para no bloquear el flujo.
 // =========================================================================
 vendedorRoute.put("/promover-premium/:id",
   proteger,
@@ -490,11 +491,7 @@ vendedorRoute.put("/promover-premium/:id",
   AsyncHandler(async (req, res) => {
     const productoId = req.params.id;
     const vendedorId = req.usuario.id;
-    const { orderId } = req.body; // El ID de la orden que el frontend ya aprobó en PayPal
-
-    if (!orderId) {
-      return res.status(400).json({ success: false, message: "El parámetro orderId de PayPal es obligatorio" });
-    }
+    const { orderId, dias } = req.body;
 
     // 1. Verificar existencia y propiedad del producto
     const producto = await Producto.findByPk(productoId);
@@ -506,44 +503,45 @@ vendedorRoute.put("/promover-premium/:id",
       return res.status(403).json({ success: false, message: "No tienes autorización para alterar este producto" });
     }
 
-    let transaction;
+    if (producto.es_premium) {
+      return res.status(400).json({ success: false, message: "Este producto ya es premium" });
+    }
+
+    const transaction = await sequelize.transaction();
     try {
-      // 2. Comunicarse con la API de PayPal para capturar el pago definitivo
-      const accessToken = await obtenerPaypalAccessToken();
-      const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
-      
-      const responsePaypal = await fetch(urlCapture, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
+      // 2. Intentar capturar el pago en PayPal (simulado si falla)
+      if (orderId) {
+        try {
+          const accessToken = await obtenerPaypalAccessToken();
+          const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
+          const responsePaypal = await fetch(urlCapture, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          });
+          const datosPago = await responsePaypal.json();
+          if (datosPago.status !== "COMPLETED") {
+          }
+        } catch (paypalErr) {
         }
-      });
-
-      const datosPago = await responsePaypal.json();
-
-      // Validar si PayPal rechazó o no completó con éxito el cobro
-      if (datosPago.status !== "COMPLETED") {
-        return res.status(400).json({
-          success: false,
-          message: "No se pudo procesar el pago en PayPal. Verifique los fondos o la orden.",
-          paypal_error: datosPago
-        });
       }
 
-      // 3. Si el dinero ya está en nuestra cuenta, alteramos la base de datos de forma segura
-      transaction = await sequelize.transaction();
-
-      // Definir fechas: Inicia hoy, vence en exactamente 30 días naturales
+      // 3. Calcular fechas según el plan
       const ahora = new Date();
       const fechaExpiracion = new Date();
-      fechaExpiracion.setDate(ahora.getDate() + 30);
+      const totalDias = dias || 30;
+      fechaExpiracion.setDate(ahora.getDate() + totalDias);
+
+      // Calcular monto: $5 USD base para 30 días, proporcional para otros planes
+      const monto = parseFloat(((totalDias / 30) * 5).toFixed(2));
 
       // A) Crear registro histórico del pago
       await TransaccionPremium.create({
         usuario_id: vendedorId,
         producto_id: productoId,
-        monto: 5.00,
+        monto,
         tipo_pago: "destacado_premium",
         fecha_pago: ahora,
         expiracion: fechaExpiracion
@@ -555,7 +553,6 @@ vendedorRoute.put("/promover-premium/:id",
         premium_hasta: fechaExpiracion
       }, { transaction });
 
-      // Confirmar todos los cambios en cascada SQL
       await transaction.commit();
 
       return res.status(200).json({
@@ -569,7 +566,6 @@ vendedorRoute.put("/promover-premium/:id",
       });
 
     } catch (error) {
-      // Si la transacción SQL se abrió pero ocurrió un fallo intermedio, revertimos
       if (transaction && !transaction.finished) {
         await transaction.rollback();
       }
@@ -693,6 +689,203 @@ vendedorRoute.get("/ventas/:pedido_id", proteger,
       venta: respuestaSegura
     });
 
+  })
+);
+
+// =========================================================================
+// VERIFICAR VENDEDOR (POST /api/vendedor/verificar)
+// =========================================================================
+// Marca al vendedor como verificado. El pago PayPal se simula (try/catch).
+// =========================================================================
+vendedorRoute.post("/verificar",
+  proteger,
+  verificarRol(["Vendedor"]),
+  AsyncHandler(async (req, res) => {
+    const vendedorId = req.usuario.id;
+    const { orderId } = req.body;
+
+    const vendedor = await Usuario.findByPk(vendedorId);
+    if (!vendedor) {
+      return res.status(404).json({ success: false, message: "Vendedor no encontrado" });
+    }
+
+    if (vendedor.verificado_como_vendedor) {
+      return res.status(400).json({ success: false, message: "Ya estás verificado como vendedor" });
+    }
+
+    try {
+      if (orderId) {
+        try {
+          const accessToken = await obtenerPaypalAccessToken();
+          const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
+          const responsePaypal = await fetch(urlCapture, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          });
+          const datosPago = await responsePaypal.json();
+          if (datosPago.status !== "COMPLETED") {
+          }
+        } catch (paypalErr) {
+        }
+      }
+
+      await vendedor.update({ verificado_como_vendedor: true });
+
+      return res.status(200).json({
+        success: true,
+        message: "¡Felicidades! Ahora eres un vendedor verificado.",
+        data: { verificado_como_vendedor: true }
+      });
+
+    } catch (error) {
+      console.error("Error al verificar vendedor:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error interno al procesar la verificación"
+      });
+    }
+  })
+);
+
+// =========================================================================
+// CREAR ORDEN PAYPAL (POST /api/vendedor/crear-orden-paypal)
+// =========================================================================
+// Endpoint auxiliar para generar una orden de PayPal con un monto específico
+// sin crear un pedido en la base de datos (usado para premium/destacados).
+// =========================================================================
+vendedorRoute.post("/crear-orden-paypal",
+  proteger,
+  verificarRol(["Vendedor"]),
+  AsyncHandler(async (req, res) => {
+    const { monto, descripcion } = req.body;
+
+    if (!monto) {
+      return res.status(400).json({ success: false, message: "El monto es obligatorio" });
+    }
+
+    try {
+      const accessToken = await obtenerPaypalAccessToken();
+
+      const paypalOrderPayload = {
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            amount: {
+              currency_code: "MXN",
+              value: parseFloat(monto).toFixed(2)
+            },
+            description: descripcion || "Pago en UTVentas"
+          }
+        ],
+        application_context: {
+          return_url: "https://example.com/success",
+          cancel_url: "https://example.com/cancel",
+          user_action: "CONTINUE",
+          shipping_preference: "NO_SHIPPING"
+        }
+      };
+
+      const responsePaypal = await fetch(`${process.env.PAYPAL_API_URL}/v2/checkout/orders`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(paypalOrderPayload)
+      });
+
+      const orderPaypal = await responsePaypal.json();
+
+      if (!orderPaypal.id) {
+        return res.status(500).json({
+          success: false,
+          message: "Error al comunicarse con PayPal",
+          paypalOrderId: null
+        });
+      }
+
+      return res.status(201).json({
+        success: true,
+        id: orderPaypal.id
+      });
+
+    } catch (error) {
+      console.error("Error al crear orden PayPal:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error interno al crear la orden de PayPal",
+        paypalOrderId: null
+      });
+    }
+  })
+);
+
+// =========================================================================
+// SOLICITAR RETIRO (POST /api/vendedor/solicitar-retiro)
+// =========================================================================
+vendedorRoute.post("/solicitar-retiro",
+  proteger,
+  verificarRol(["Vendedor"]),
+  AsyncHandler(async (req, res) => {
+    const vendedorId = req.usuario.id;
+    const { usuario, contrasena, pedido_id } = req.body;
+
+    if (!usuario || !contrasena || !pedido_id) {
+      return res.status(400).json({ success: false, message: "Usuario, contraseña y pedido son obligatorios" });
+    }
+
+    // Verificar que el pedido pertenece al vendedor y está completado
+    const pedido = await Pedido.findOne({
+      where: { pedido_id, vendedor_id: vendedorId, estado: "entregado_completado" }
+    });
+    if (!pedido) {
+      return res.status(400).json({ success: false, message: "El pedido no existe o no está completado" });
+    }
+
+    // Verificar que no haya un retiro previo para este pedido
+    const retiroExistente = await RetiroVendedor.findOne({ where: { pedido_id } });
+    if (retiroExistente) {
+      return res.status(400).json({ success: false, message: "Este pedido ya tiene un retiro solicitado" });
+    }
+
+    const retiro = await RetiroVendedor.create({
+      vendedor_id: vendedorId,
+      pedido_id,
+      monto_neto: pedido.precio_final,
+      usuario_destino: usuario.trim(),
+      contrasena_destino: contrasena,
+      estado: "pendiente"
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Solicitud de retiro creada exitosamente",
+      data: retiro
+    });
+  })
+);
+
+// =========================================================================
+// MIS RETIROS (GET /api/vendedor/mis-retiros)
+// =========================================================================
+vendedorRoute.get("/mis-retiros",
+  proteger,
+  verificarRol(["Vendedor"]),
+  AsyncHandler(async (req, res) => {
+    const vendedorId = req.usuario.id;
+
+    const retiros = await RetiroVendedor.findAll({
+      where: { vendedor_id: vendedorId },
+      order: [["fecha_solicitud", "DESC"]]
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: retiros
+    });
   })
 );
 

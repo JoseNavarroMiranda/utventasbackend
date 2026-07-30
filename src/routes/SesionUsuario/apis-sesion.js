@@ -312,7 +312,8 @@ usuarioRoute.post("/login", AsyncHandler(async (req, res) => {
             rol_nombre: usuario.Rol ? usuario.Rol.nombre : null,
             telefono_defecto: usuario.telefono_defecto,
             es_verificado: usuario.es_verificado,
-            es_activo: usuario.es_activo
+            es_activo: usuario.es_activo,
+            verificado_como_vendedor: usuario.verificado_como_vendedor
         }
     });
 }));
@@ -385,6 +386,9 @@ usuarioRoute.get("/perfil", proteger, AsyncHandler(async (req, res) => {
                 correo: usuario.correo,
                 telefono_defecto: usuario.telefono_defecto,
                 rol_nombre: usuario.Rol?.nombre,
+                es_verificado: usuario.es_verificado,
+                es_activo: usuario.es_activo,
+                verificado_como_vendedor: usuario.verificado_como_vendedor
             }
         });
 

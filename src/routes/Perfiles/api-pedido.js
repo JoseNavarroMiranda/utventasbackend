@@ -138,6 +138,12 @@ pedidoRoute.post(
         token_entrega: pinEntrega
       }, { transaction });
 
+      // Desactivar producto para evitar doble venta
+      await Producto.update(
+        { es_activo: false },
+        { where: { producto_id: producto.producto_id }, transaction }
+      );
+
       // 5. Registrar en el Histórico de Auditoría
       await HistoricoPedido.create({
         pedido_id: nuevoPedido.pedido_id,

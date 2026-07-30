@@ -44,6 +44,11 @@ module.exports = (sequelize) => {
     es_activo: {
       type: DataTypes.BOOLEAN,
       defaultValue: true
+    },
+
+    verificado_como_vendedor: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false
     }
   }, {
     tableName: 'usuarios',

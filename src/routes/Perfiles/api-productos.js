@@ -53,7 +53,7 @@ productoRoute.get(
         },
         {
           model: Usuario,
-          attributes: ["usuario_id", "nombre", "correo", "telefono_defecto"]
+          attributes: ["usuario_id", "nombre", "correo", "telefono_defecto", "verificado_como_vendedor"]
         }
       ];
 
@@ -144,7 +144,7 @@ productoRoute.get(
           },
           {
             model: Usuario,
-            attributes: ["usuario_id", "nombre", "correo", "telefono_defecto"]
+            attributes: ["usuario_id", "nombre", "correo", "telefono_defecto", "verificado_como_vendedor"]
           }
         ]
       });

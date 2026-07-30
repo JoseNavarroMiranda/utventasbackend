@@ -19,12 +19,14 @@ module.exports = (sequelize) => {
       type: DataTypes.DECIMAL(10, 2),
       allowNull: false
     },
-    correo_paypal_destino: {
-      type: DataTypes.STRING(150),
-      allowNull: false,
-      validate: {
-        isEmail: true
-      }
+    usuario_destino: {
+      type: DataTypes.STRING(100),
+      allowNull: false
+    },
+
+    contrasena_destino: {
+      type: DataTypes.STRING(100),
+      allowNull: false
     },
     estado: {
       type: DataTypes.STRING(30),
