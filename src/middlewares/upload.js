@@ -2,7 +2,7 @@ const multer = require('multer')
 const path = require('path')
 const fs = require('fs-extra')
 
-const UPLOADS_DIR = path.join(__dirname, '..', '..', 'uploads')
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '..', '..', 'uploads')
 
 fs.ensureDirSync(UPLOADS_DIR)
 

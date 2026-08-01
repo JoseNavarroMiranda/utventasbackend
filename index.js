@@ -13,8 +13,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT;
 
-// Asegurar directorio de uploads
-const uploadsDir = path.join(__dirname, 'uploads');
+// Asegurar directorio de uploads (UPLOADS_DIR apunta al volume persistente en Railway)
+const uploadsDir = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
 fs.ensureDirSync(uploadsDir);
 
 // Servir archivos estáticos de uploads
@@ -40,7 +40,8 @@ app.use(session({
     saveUninitialized: false,
     cookie: {
         httpOnly: true,
-        sameSite: "strict",
+        sameSite: process.env.COOKIE_SAMESITE || "lax",
+        secure: process.env.NODE_ENV === "production",
         maxAge: 30 * 24 * 60 * 60 * 1000
     }
 }));
