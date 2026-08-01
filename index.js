@@ -11,7 +11,7 @@ const { sequelize } = require('./src/models'); // Importar modelos
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT;
 
 // Asegurar directorio de uploads
 const uploadsDir = path.join(__dirname, 'uploads');
