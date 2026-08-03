@@ -254,24 +254,34 @@ pedidoRoute.put(
     const transaction = await sequelize.transaction();
     try {
       let authorizationId;
-      try {
-        const accessToken = await obtenerPaypalAccessToken();
-        const urlAuthorize = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${paypal_order_id}/authorize`;
-        const responsePaypal = await fetch(urlAuthorize, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          }
-        });
-        const datosAutorizacion = await responsePaypal.json();
-        if (datosAutorizacion && datosAutorizacion.purchase_units && datosAutorizacion.status === "COMPLETED") {
-          authorizationId = datosAutorizacion.purchase_units[0].payments.authorizations[0].id;
-        } else {
-          authorizationId = `SIM_AUTH_${Date.now()}`;
+
+      const accessToken = await obtenerPaypalAccessToken();
+      const urlAuthorize = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${paypal_order_id}/authorize`;
+      const responsePaypal = await fetch(urlAuthorize, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
         }
-      } catch (paypalErr) {
-        authorizationId = `SIM_AUTH_${Date.now()}`;
+      });
+      const datosAutorizacion = await responsePaypal.json();
+
+      if (!responsePaypal.ok || datosAutorizacion.status !== "COMPLETED") {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "El pago no fue autorizado por PayPal. El comprador debe completar la aprobación con su cuenta.",
+          detalles: datosAutorizacion
+        });
+      }
+
+      authorizationId = datosAutorizacion.purchase_units?.[0]?.payments?.authorizations?.[0]?.id;
+      if (!authorizationId) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "PayPal no devolvió la autorización del pago"
+        });
       }
 
       // Actualizar Pedido
@@ -346,24 +356,31 @@ pedidoRoute.put(
 
     const transaction = await sequelize.transaction();
     try {
-      try {
-        const accessToken = await obtenerPaypalAccessToken();
-        const urlCapture = `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${pedido.paypal_capture_id}/capture`;
-        const responsePaypal = await fetch(urlCapture, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({})
-        });
-        const datosCaptura = await responsePaypal.json();
-        if (!datosCaptura || datosCaptura.status !== "COMPLETED") {
-        }
-      } catch (paypalErr) {
+      const accessToken = await obtenerPaypalAccessToken();
+      const urlCapture = `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${pedido.paypal_capture_id}/capture`;
+      const responsePaypal = await fetch(urlCapture, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      const datosCaptura = await responsePaypal.json();
+
+      const yaCapturada =
+        datosCaptura.name === "UNPROCESSABLE_ENTITY" &&
+        Array.isArray(datosCaptura.details) &&
+        datosCaptura.details.some((d) => d.issue === "AUTHORIZATION_ALREADY_CAPTURED");
+
+      if (!responsePaypal.ok && !yaCapturada) {
+        throw new Error(
+          "PayPal no capturó el pago: " +
+          (datosCaptura.message || JSON.stringify(datosCaptura))
+        );
       }
 
-      // 4. Si el dinero se transfirió a la cuenta de la plataforma, actualizamos la BD
+      // El dinero ya fue capturado y transferido a la cuenta de la plataforma; actualizamos la BD
       const estadoAnterior = pedido.estado;
       
       // Actualizamos el pedido a completado
