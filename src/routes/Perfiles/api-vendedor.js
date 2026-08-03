@@ -831,10 +831,10 @@ vendedorRoute.post("/solicitar-retiro",
   verificarRol(["Vendedor"]),
   AsyncHandler(async (req, res) => {
     const vendedorId = req.usuario.id;
-    const { usuario, contrasena, pedido_id } = req.body;
+    const { correo_paypal_destino, pedido_id } = req.body;
 
-    if (!usuario || !contrasena || !pedido_id) {
-      return res.status(400).json({ success: false, message: "Usuario, contraseña y pedido son obligatorios" });
+    if (!correo_paypal_destino || !pedido_id) {
+      return res.status(400).json({ success: false, message: "El correo PayPal y el pedido son obligatorios" });
     }
 
     // Verificar que el pedido pertenece al vendedor y está completado
@@ -855,8 +855,7 @@ vendedorRoute.post("/solicitar-retiro",
       vendedor_id: vendedorId,
       pedido_id,
       monto_neto: pedido.precio_final,
-      usuario_destino: usuario.trim(),
-      contrasena_destino: contrasena,
+      correo_paypal_destino: correo_paypal_destino.trim(),
       estado: "pendiente"
     });
 
