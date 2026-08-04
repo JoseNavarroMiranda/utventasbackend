@@ -25,8 +25,8 @@ Usuario.hasMany(Producto, { foreignKey: 'usuario_id', onDelete: 'CASCADE' });
 Producto.belongsTo(Usuario, { foreignKey: 'usuario_id' });
 
 // Categorias <-> Productos
-Categoria.hasMany(Producto, { foreignKey: 'categoria_id', onDelete: 'SET NULL' });
-Producto.belongsTo(Categoria, { foreignKey: 'categoria_id' });
+Categoria.hasMany(Producto, { foreignKey: 'categoria_id', as: 'Productos', onDelete: 'SET NULL' });
+Producto.belongsTo(Categoria, { foreignKey: 'categoria_id', as: 'Categoria' });
 
 // Productos <-> ProductoImagenes
 Producto.hasMany(ProductoImagen, { foreignKey: 'producto_id', onDelete: 'CASCADE' });

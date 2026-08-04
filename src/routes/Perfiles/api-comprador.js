@@ -1,7 +1,7 @@
 const express = require("express");
 const compradorRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
-const { Pedido, Usuario, Producto, Disputa} = require("../../models");
+const { Pedido, Usuario, Producto, Categoria, Disputa} = require("../../models");
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
 
 // ======================================================================
@@ -26,7 +26,16 @@ compradorRoute.get(
           attributes: [
             "producto_id",
             "titulo",
-            "precio"
+            "precio",
+            "contacto_metodo",
+            "contacto_telefono"
+          ],
+          include: [
+            {
+              model: Categoria,
+              as: "Categoria",
+              attributes: ["nombre"]
+            }
           ]
         },
         {
@@ -35,7 +44,8 @@ compradorRoute.get(
           attributes: [
             "usuario_id",
             "nombre",
-            "correo"
+            "correo",
+            "telefono_defecto"
           ]
         }
       ],
@@ -76,7 +86,16 @@ compradorRoute.get(
             "producto_id",
             "titulo",
             "descripcion",
-            "precio"
+            "precio",
+            "contacto_metodo",
+            "contacto_telefono"
+          ],
+          include: [
+            {
+              model: Categoria,
+              as: "Categoria",
+              attributes: ["nombre"]
+            }
           ]
         },
         {
@@ -85,7 +104,8 @@ compradorRoute.get(
           attributes: [
             "usuario_id",
             "nombre",
-            "correo"
+            "correo",
+            "telefono_defecto"
           ]
         }
       ]

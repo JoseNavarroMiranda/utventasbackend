@@ -60,6 +60,7 @@ productoRoute.get(
       // C) Filtro por Nombre de Categoría
       const categoriaInclude = {
         model: Categoria,
+        as: "Categoria",
         attributes: ["categoria_id", "nombre"]
       };
 
@@ -136,6 +137,7 @@ productoRoute.get(
         include: [
           {
             model: Categoria,
+            as: "Categoria",
             attributes: ["categoria_id", "nombre"]
           },
           {

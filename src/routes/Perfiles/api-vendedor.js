@@ -392,6 +392,7 @@ vendedorRoute.get("/mis-publicaciones",
         include: [
           {
             model: Categoria,
+            as: "Categoria",
             attributes: ["categoria_id", "nombre"]
           },
           {
@@ -435,6 +436,7 @@ vendedorRoute.get("/mis-publicaciones/:id",
         include: [
           {
             model: Categoria,
+            as: "Categoria",
             attributes: ["categoria_id", "nombre"]
           },
           {
