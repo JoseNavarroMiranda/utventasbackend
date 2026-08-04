@@ -493,7 +493,11 @@ vendedorRoute.put("/promover-premium/:id",
   AsyncHandler(async (req, res) => {
     const productoId = req.params.id;
     const vendedorId = req.usuario.id;
-    const { orderId, dias } = req.body;
+    const { orderId, dias, monto } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ success: false, message: "El pago con PayPal es obligatorio para destacar tu anuncio" });
+    }
 
     // 1. Verificar existencia y propiedad del producto
     const producto = await Producto.findByPk(productoId);
@@ -511,23 +515,30 @@ vendedorRoute.put("/promover-premium/:id",
 
     const transaction = await sequelize.transaction();
     try {
-      // 2. Intentar capturar el pago en PayPal (simulado si falla)
-      if (orderId) {
-        try {
-          const accessToken = await obtenerPaypalAccessToken();
-          const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
-          const responsePaypal = await fetch(urlCapture, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json"
-            }
-          });
-          const datosPago = await responsePaypal.json();
-          if (datosPago.status !== "COMPLETED") {
+      // 2. Capturar el pago en PayPal (obligatorio para activar el premium)
+      try {
+        const accessToken = await obtenerPaypalAccessToken();
+        const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
+        const responsePaypal = await fetch(urlCapture, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
           }
-        } catch (paypalErr) {
+        });
+        const datosPago = await responsePaypal.json();
+        if (datosPago.status !== "COMPLETED") {
+          return res.status(402).json({
+            success: false,
+            message: "El pago con PayPal no fue completado. Intenta nuevamente."
+          });
         }
+      } catch (paypalErr) {
+        console.error("Error capturando pago PayPal (premium):", paypalErr.message);
+        return res.status(502).json({
+          success: false,
+          message: "Hubo un problema al cobrar con PayPal. Intenta nuevamente."
+        });
       }
 
       // 3. Calcular fechas según el plan
@@ -536,14 +547,14 @@ vendedorRoute.put("/promover-premium/:id",
       const totalDias = dias || 30;
       fechaExpiracion.setDate(ahora.getDate() + totalDias);
 
-      // Calcular monto: $5 USD base para 30 días, proporcional para otros planes
-      const monto = parseFloat(((totalDias / 30) * 5).toFixed(2));
+      // Monto cobrado en MXN (se recibe del frontend según el plan elegido)
+      const montoReal = parseFloat(monto).toFixed(2);
 
       // A) Crear registro histórico del pago
       await TransaccionPremium.create({
         usuario_id: vendedorId,
         producto_id: productoId,
-        monto,
+        monto: montoReal,
         tipo_pago: "destacado_premium",
         fecha_pago: ahora,
         expiracion: fechaExpiracion
@@ -706,6 +717,10 @@ vendedorRoute.post("/verificar",
     const vendedorId = req.usuario.id;
     const { orderId } = req.body;
 
+    if (!orderId) {
+      return res.status(400).json({ success: false, message: "El pago con PayPal es obligatorio para verificar tu cuenta" });
+    }
+
     const vendedor = await Usuario.findByPk(vendedorId);
     if (!vendedor) {
       return res.status(404).json({ success: false, message: "Vendedor no encontrado" });
@@ -716,22 +731,30 @@ vendedorRoute.post("/verificar",
     }
 
     try {
-      if (orderId) {
-        try {
-          const accessToken = await obtenerPaypalAccessToken();
-          const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
-          const responsePaypal = await fetch(urlCapture, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json"
-            }
-          });
-          const datosPago = await responsePaypal.json();
-          if (datosPago.status !== "COMPLETED") {
+      // Capturar el pago en PayPal (obligatorio para verificar)
+      try {
+        const accessToken = await obtenerPaypalAccessToken();
+        const urlCapture = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${orderId}/capture`;
+        const responsePaypal = await fetch(urlCapture, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
           }
-        } catch (paypalErr) {
+        });
+        const datosPago = await responsePaypal.json();
+        if (datosPago.status !== "COMPLETED") {
+          return res.status(402).json({
+            success: false,
+            message: "El pago con PayPal no fue completado. Intenta nuevamente."
+          });
         }
+      } catch (paypalErr) {
+        console.error("Error capturando pago PayPal (verificación):", paypalErr.message);
+        return res.status(502).json({
+          success: false,
+          message: "Hubo un problema al cobrar con PayPal. Intenta nuevamente."
+        });
       }
 
       await vendedor.update({ verificado_como_vendedor: true });
