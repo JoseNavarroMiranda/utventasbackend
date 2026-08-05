@@ -21,9 +21,13 @@ productoRoute.get(
     try {
       const { buscar, categoria, precio_min, precio_max } = req.query;
 
-      // Filtro base: Solo productos activos
+      // Filtro base: Solo productos activos y no suspendidos (ni en relanzamiento)
       const whereConditions = {
-        es_activo: true
+        es_activo: true,
+        [Op.or]: [
+          { suspendido: false },
+          { suspendido: null }
+        ]
       };
 
       // A) Filtro por término de búsqueda (Título o Descripción)
@@ -110,9 +114,10 @@ productoRoute.get(
     try {
       const pedidos = await Pedido.findAll({
         where: {
-          // Solo ventas confirmadas (fondos en escrow). Un pedido 'pendiente_pago'
-          // abandonado NO debe marcar el producto como "en proceso" para los demás.
-          estado: ['pagado_escrow']
+          // Solo ventas que bloquean el producto para los demás: escrow activo
+          // o disputa en curso (fondos retenidos). Un pedido 'pendiente_pago'
+          // abandonado NO debe marcar el producto como "en proceso".
+          estado: ['pagado_escrow', 'en_disputa']
         },
         attributes: ['producto_id'],
         group: ['producto_id']
@@ -160,11 +165,11 @@ productoRoute.get(
         });
       }
 
-      // Validar si el producto está pausado/inactivo
-      if (!producto.es_activo) {
+      // Validar si el producto está pausado/inactivo o suspendido por resolución de disputa
+      if (!producto.es_activo || producto.suspendido) {
         return res.status(400).json({
           success: false,
-          message: "Este artículo ya no está disponible para la venta (fue vendido o pausado)"
+          message: "Este artículo ya no está disponible para la venta (fue vendido, pausado o está en revisión/republicación)"
         });
       }
 

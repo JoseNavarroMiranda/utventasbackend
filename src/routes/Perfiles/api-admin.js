@@ -245,6 +245,9 @@ adminRoute.get("/disputas",
         try{
 
             const disputas = await Disputa.findAll({
+                where: {
+                    estado: ["abierta", "en_investigacion"]
+                },
                 include: [
                     {
                         model: Pedido,
@@ -418,6 +421,14 @@ adminRoute.put("/disputas/:disputa_id/resolver",
         }, { transaction });
 
         await pedido.update({ estado: "entregado_completado" }, { transaction });
+
+        // La venta se completa: el producto queda vendido y sale del catálogo.
+        if (pedido.producto_id) {
+          await Producto.update(
+            { es_activo: false, suspendido: false },
+            { where: { producto_id: pedido.producto_id }, transaction }
+          );
+        }
 
         await HistoricoPedido.create({
           pedido_id: pedido.pedido_id,
