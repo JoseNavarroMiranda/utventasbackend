@@ -38,6 +38,10 @@ module.exports = (sequelize) => {
       type: DataTypes.STRING(100),
       allowNull: true
     },
+    paypal_refund_id: {
+      type: DataTypes.STRING(100),
+      allowNull: true
+    },
     token_entrega: {
       type: DataTypes.STRING(10),
       allowNull: false

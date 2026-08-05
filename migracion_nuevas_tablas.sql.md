@@ -8,6 +8,12 @@
 ALTER TABLE productos ADD COLUMN suspendido TINYINT(1) NOT NULL DEFAULT 0;
 ```
 
+## 1b) Agregar columna descripcion a disputas
+
+```sql
+ALTER TABLE disputas ADD COLUMN descripcion TEXT NULL;
+```
+
 ## 2) Crear tabla disputa_imagenes
 
 ```sql

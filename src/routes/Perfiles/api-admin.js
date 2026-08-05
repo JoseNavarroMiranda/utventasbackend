@@ -20,7 +20,146 @@ const obtenerPaypalAccessToken = async () => {
     }
   });
   const data = await response.json();
+  if (!data.access_token) {
+    throw new Error("No se pudo obtener el access token de PayPal: " + JSON.stringify(data));
+  }
   return data.access_token;
+};
+
+// Consulta el estado actual de una autorización de PayPal (escrow)
+const obtenerEstadoAutorizacion = async (accessToken, authorizationId) => {
+  const response = await fetch(
+    `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${authorizationId}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  return { ok: response.ok, status: response.status, data: await response.json() };
+};
+
+// Ejecuta la devolución (REEMBOLSO) de un pago en escrow y la VALIDA en PayPal.
+// Devuelve { metodo, transaction_id, status } o lanza un error si PayPal no confirma.
+const ejecutarReembolsoPaypal = async (accessToken, pedido) => {
+  const authorizationId = pedido.paypal_capture_id;
+  if (!authorizationId) {
+    throw new Error("El pedido no tiene referencia de pago en PayPal para reembolsar.");
+  }
+
+  const { ok, data: autorizacion } = await obtenerEstadoAutorizacion(accessToken, authorizationId);
+
+  if (!ok) {
+    throw new Error(
+      "PayPal no encontró la autorización del pedido: " +
+      (autorizacion.message || JSON.stringify(autorizacion))
+    );
+  }
+
+  const status = autorizacion.status;
+
+  // Ya devuelta previamente: se valida como reembolso confirmado (idempotente)
+  if (status === "VOIDED") {
+    return {
+      metodo: "void",
+      transaction_id: authorizationId,
+      status: "VOIDED",
+      ya_confirmado: true
+    };
+  }
+
+  if (status === "CAPTURED") {
+    // El dinero ya fue capturado a la plataforma: hay que emitir un refund contra el capture
+    const captures = autorizacion.purchase_units?.[0]?.payments?.captures || [];
+    const capture = captures.find((c) => c.status === "COMPLETED") || captures[0];
+    if (!capture?.id) {
+      throw new Error("PayPal no devolvió el capture ID para reembolsar: " + JSON.stringify(autorizacion));
+    }
+    const responseRefund = await fetch(
+      `${process.env.PAYPAL_API_URL}/v2/payments/captures/${capture.id}/refund`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          amount: {
+            value: String(Number(pedido.precio_final).toFixed(2)),
+            currency_code: "MXN"
+          },
+          note_to_payer: "Reembolso por resolución de disputa UTVentas"
+        })
+      }
+    );
+    const datosRefund = await responseRefund.json();
+
+    if (!responseRefund.ok) {
+      const yaReembolsado =
+        datosRefund.name === "UNPROCESSABLE_ENTITY" &&
+        Array.isArray(datosRefund.details) &&
+        datosRefund.details.some(
+          (d) => d.issue === "CAPTURE_FULLY_REFUNDED" || d.issue === "CAPTURE_ALREADY_REFUNDED"
+        );
+      if (!yaReembolsado) {
+        throw new Error(
+          "PayPal rechazó el reembolso: " + (datosRefund.message || JSON.stringify(datosRefund))
+        );
+      }
+    }
+
+    return {
+      metodo: "refund",
+      transaction_id: datosRefund.id || capture.id,
+      status: datosRefund.status || "REFUNDED",
+      ya_confirmado: !responseRefund.ok
+    };
+  }
+
+  // Estado creado/authorized/pending: se revoca la autorización (void) y el dinero
+  // regresa automáticamente a la cuenta PayPal sandbox del comprador.
+  if (status !== "AUTHORIZED" && status !== "PENDING" && status !== "CREATED") {
+    throw new Error(
+      "La autorización de PayPal está en estado '" + status + "' y no se puede reembolsar."
+    );
+  }
+
+  const responseVoid = await fetch(
+    `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${authorizationId}/void`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+  const datosVoid = await responseVoid.json();
+
+  if (!responseVoid.ok) {
+    const yaVoided =
+      datosVoid.name === "UNPROCESSABLE_ENTITY" &&
+      Array.isArray(datosVoid.details) &&
+      datosVoid.details.some((d) => d.issue === "AUTHORIZATION_VOIDED");
+    if (!yaVoided) {
+      throw new Error(
+        "PayPal rechazó la devolución del escrow: " +
+        (datosVoid.message || JSON.stringify(datosVoid))
+      );
+    }
+  }
+
+  // VALIDACIÓN final: consultamos la autorización de nuevo y confirmamos que quedó VOIDED
+  const confirmacion = await obtenerEstadoAutorizacion(accessToken, authorizationId);
+  if (!confirmacion.ok || confirmacion.data.status !== "VOIDED") {
+    throw new Error(
+      "PayPal no confirmó la devolución del escrow. Estado obtenido: " +
+      (confirmacion.data.status || confirmacion.data.message || "desconocido")
+    );
+  }
+
+  return {
+    metodo: "void",
+    transaction_id: authorizationId,
+    status: "VOIDED",
+    ya_confirmado: !responseVoid.ok
+  };
 };
 
 
@@ -359,31 +498,44 @@ adminRoute.put("/disputas/:disputa_id/resolver",
 
     const transaction = await sequelize.transaction();
     try {
-      try {
-        const accessToken = await obtenerPaypalAccessToken();
+      const accessToken = await obtenerPaypalAccessToken();
 
-        if (veredicto === "REEMBOLSO") {
-          const urlVoid = `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${pedido.paypal_capture_id}/void`;
-          await fetch(urlVoid, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json"
-            }
-          });
-        } else {
-          const urlCapture = `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${pedido.paypal_capture_id}/capture`;
-          await fetch(urlCapture, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({})
-          });
+      let paypalResult = null;
+
+      if (veredicto === "REEMBOLSO") {
+        // Devuelve el dinero al comprador y VALIDA la operación en PayPal sandbox.
+        // Si PayPal no confirma la devolución, se lanza un error y se revierte todo.
+        paypalResult = await ejecutarReembolsoPaypal(accessToken, pedido);
+      } else {
+        const urlCapture = `${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${pedido.paypal_capture_id}/capture`;
+        const responseCapture = await fetch(urlCapture, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({})
+        });
+        const datosCaptura = await responseCapture.json();
+
+        const yaCapturada =
+          datosCaptura.name === "UNPROCESSABLE_ENTITY" &&
+          Array.isArray(datosCaptura.details) &&
+          datosCaptura.details.some((d) => d.issue === "AUTHORIZATION_ALREADY_CAPTURED");
+
+        if (!responseCapture.ok && !yaCapturada) {
+          throw new Error(
+            "PayPal no capturó el pago: " +
+            (datosCaptura.message || JSON.stringify(datosCaptura))
+          );
         }
-      } catch (paypalErr) {
-        console.log("PayPal simulation (dispute resolution):", paypalErr.message);
+
+        paypalResult = {
+          metodo: "capture",
+          transaction_id: datosCaptura.id || pedido.paypal_capture_id,
+          status: yaCapturada ? "CAPTURED" : (datosCaptura.status || "COMPLETED"),
+          ya_confirmado: yaCapturada
+        };
       }
 
       if (veredicto === "REEMBOLSO") {
@@ -394,7 +546,10 @@ adminRoute.put("/disputas/:disputa_id/resolver",
           fecha_resolucion: new Date()
         }, { transaction });
 
-        await pedido.update({ estado: "cancelado_reembolsado" }, { transaction });
+        await pedido.update({
+          estado: "cancelado_reembolsado",
+          paypal_refund_id: paypalResult.transaction_id
+        }, { transaction });
 
         // La publicación queda SUSPENDIDA: el vendedor deberá solicitarla relanzar
         // para que vuelva a estar disponible para otro comprador.
@@ -410,7 +565,7 @@ adminRoute.put("/disputas/:disputa_id/resolver",
           estado_anterior: "en_disputa",
           estado_nuevo: "cancelado_reembolsado",
           usuario_accion_id: adminId,
-          notes_auditoria: `Reembolso al comprador aprobado por el administrador. Publicación suspendida. ${resolucion_texto.trim()}`
+          notes_auditoria: `Reembolso al comprador aprobado por el administrador. PayPal ${paypalResult.metodo} confirmado (id: ${paypalResult.transaction_id}, status: ${paypalResult.status}). Publicación suspendida. ${resolucion_texto.trim()}`
         }, { transaction });
       } else {
         await disputa.update({
@@ -435,20 +590,24 @@ adminRoute.put("/disputas/:disputa_id/resolver",
           estado_anterior: "en_disputa",
           estado_nuevo: "entregado_completado",
           usuario_accion_id: adminId,
-          notes_auditoria: `Disputa resuelta a favor del vendedor. Fondos liberados. ${resolucion_texto.trim()}`
+          notes_auditoria: `Disputa resuelta a favor del vendedor. Fondos liberados por PayPal (${paypalResult.transaction_id}, status: ${paypalResult.status}). ${resolucion_texto.trim()}`
         }, { transaction });
       }
 
       await transaction.commit();
       return res.status(200).json({
         success: true,
-        message: `Disputa resuelta exitosamente con veredicto: ${veredicto}.`
+        message: `Disputa resuelta exitosamente con veredicto: ${veredicto}.`,
+        paypal: paypalResult
       });
 
     } catch (error) {
       if (transaction && !transaction.finished) await transaction.rollback();
       console.error("Error al resolver disputa:", error);
-      return res.status(500).json({ success: false, message: "Error interno al procesar la resolución." });
+      return res.status(502).json({
+        success: false,
+        message: `La operación ${veredicto} no fue confirmada por PayPal y se canceló el cambio de estado: ${error.message}`
+      });
     }
   })
 );

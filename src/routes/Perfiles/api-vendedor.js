@@ -643,10 +643,28 @@ vendedorRoute.get("/historial-ventas",
       order: [["fecha_creacion", "DESC"]]
     });
 
+    // Totales validados para el dashboard del vendedor: la cantidad
+    // reembolsada se descuenta del saldo disponible.
+    const totalVendido = ventas
+      .filter((v) => v.estado === "entregado_completado")
+      .reduce((s, v) => s + Number(v.precio_final || 0), 0);
+    const totalReembolsado = ventas
+      .filter((v) => v.estado === "cancelado_reembolsado")
+      .reduce((s, v) => s + Number(v.precio_final || 0), 0);
+    const totalEscrow = ventas
+      .filter((v) => v.estado === "pagado_escrow" || v.estado === "en_disputa")
+      .reduce((s, v) => s + Number(v.precio_final || 0), 0);
+
     return res.status(200).json({
       success: true,
       message: "Historial de ventas obtenido correctamente.",
-      ventas
+      ventas,
+      totales: {
+        monto_vendido: totalVendido,
+        monto_reembolsado: totalReembolsado,
+        monto_en_escrow: totalEscrow,
+        saldo_disponible: totalVendido - totalReembolsado
+      }
     });
 
   })

@@ -195,8 +195,25 @@ pedidoRoute.put(
       }
     }
 
+    // Idempotencia: si el pedido ya fue confirmado (o completado) en un intento
+    // anterior (por ejemplo, la app se cerró tras aprobar en PayPal y el flujo
+    // se reintentó), no se procesa dos veces ni se cobra doble.
+    if (pedidoExistente && pedidoExistente.estado === "pagado_escrow") {
+      return res.status(200).json({
+        success: true,
+        message: "El pago ya fue confirmado anteriormente. Tus fondos están en escrow y el pedido sigue activo.",
+        estado: "pagado_escrow"
+      });
+    }
+    if (pedidoExistente && pedidoExistente.estado === "entregado_completado") {
+      return res.status(200).json({
+        success: true,
+        message: "Este pedido ya fue completado correctamente.",
+        estado: "entregado_completado"
+      });
+    }
     if (pedidoExistente && pedidoExistente.estado !== "pendiente_pago") {
-      return res.status(400).json({ success: false, message: "El pedido no está en estado pendiente de pago" });
+      return res.status(400).json({ success: false, message: "El pedido no está en estado pendiente de pago. No se marcó ninguna compra como completada." });
     }
 
     // 2. Pre-chequeo: ¿el producto ya fue comprado por otro cliente?
@@ -212,9 +229,29 @@ pedidoRoute.put(
     }
 
     // 3. Autorizar la orden en PayPal para congelar los fondos
+    // Validación previa: el comprador debe haber completado la aprobación en
+    // PayPal. Si el usuario quitó o cerró la ventana de la app sin aprobar, la
+    // orden queda en estado CREATED/PAYER_ACTION_REQUIRED y NO se marca ningún
+    // pedido como completado.
     let authorizationId;
     try {
       const accessToken = await obtenerPaypalAccessToken();
+
+      const resEstado = await fetch(`${process.env.PAYPAL_API_URL}/v2/checkout/orders/${paypal_order_id}`, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const datosEstado = await resEstado.json();
+
+      if (!resEstado.ok || !["APPROVED", "COMPLETED"].includes(datosEstado.status)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "El pago con PayPal no fue completado correctamente porque se abandonó la ventana de pago o se cerró la app. " +
+            "No se marcó ningún pedido como completado. Vuelve a intentarlo.",
+          estado_paypal: datosEstado.status
+        });
+      }
+
       const urlAuthorize = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${paypal_order_id}/authorize`;
       const responsePaypal = await fetch(urlAuthorize, {
         method: "POST",
@@ -396,8 +433,22 @@ pedidoRoute.put(
       return res.status(403).json({ success: false, message: "No tienes autorización sobre este pedido" });
     }
 
+    // Idempotencia: si la venta ya quedó completada en un intento anterior
+    // (aunque la app se cerrara justo después del capture), se informa como
+    // completada en lugar de devolver error.
+    if (pedido.estado === "entregado_completado") {
+      return res.status(200).json({
+        success: true,
+        message: "La venta ya fue finalizada correctamente. Los fondos ya fueron liberados.",
+        data: { pedido_id: pedido.pedido_id, estado: "entregado_completado" }
+      });
+    }
+
     if (pedido.estado !== "pagado_escrow") {
-      return res.status(400).json({ success: false, message: "El pago de este pedido no está congelado en Escrow o ya fue finalizado" });
+      return res.status(400).json({
+        success: false,
+        message: "El pago de este pedido no está congelado en Escrow o ya fue finalizado. La venta NO se marcó como completada."
+      });
     }
 
     // 2. Validar que el PIN (token_entrega) coincida
@@ -468,7 +519,13 @@ pedidoRoute.put(
     } catch (error) {
       if (transaction && !transaction.finished) await transaction.rollback();
       console.error("Error crítico al capturar el Escrow con PIN:", error);
-      return res.status(500).json({ success: false, message: "Error interno al finalizar la transacción" });
+      // La venta NO se marcó como completada: el cambio de estado quedó revertido.
+      return res.status(500).json({
+        success: false,
+        message:
+          "La venta no se finalizó correctamente y NO se marcó como completada: " +
+          (error.message || "ocurrió un error al liberar los fondos. Intenta nuevamente.")
+      });
     }
   })
 );
