@@ -476,7 +476,13 @@ adminRoute.get("/auditoria-pedidos",
       include: [
         {
           model: Pedido,
-          attributes: ["pedido_id", "precio_final", "estado"]
+          attributes: ["pedido_id", "precio_final", "estado", "producto_id"],
+          include: [
+            {
+              model: Producto,
+              attributes: ["producto_id", "titulo", "precio", "es_activo", "suspendido"]
+            }
+          ]
         },
         {
           model: Usuario,
