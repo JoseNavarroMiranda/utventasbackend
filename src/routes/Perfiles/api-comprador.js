@@ -1,8 +1,30 @@
 const express = require("express");
 const compradorRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
-const { Pedido, Usuario, Producto, Categoria, Disputa} = require("../../models");
+const { Pedido, Usuario, Producto, Categoria, Disputa, DisputaImagen } = require("../../models");
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
+const upload = require("../../middlewares/upload");
+
+// ======================================================================
+// SUBIR IMÁGENES DE EVIDENCIA (POST /api/comprador/subir-imagen)
+// ======================================================================
+// El comprador sube imágenes para adjuntarlas a su disputa. Devuelve la
+// URL absoluta de la imagen almacenada en /uploads.
+// ======================================================================
+compradorRoute.post(
+  "/subir-imagen",
+  proteger,
+  verificarRol(["Comprador"]),
+  upload.single("imagen"),
+  AsyncHandler(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No se envió ninguna imagen" });
+    }
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const url = `${baseUrl}/uploads/${req.file.filename}`;
+    res.status(200).json({ success: true, url });
+  })
+);
 
 // ======================================================================
 // HISTORIAL DE COMPRAS
@@ -136,7 +158,7 @@ compradorRoute.post("/disputas",
   verificarRol(["Comprador"]),
   AsyncHandler(async (req, res) => {
     const compradorId = req.usuario.id;
-    const { pedido_id, motivo } = req.body;
+    const { pedido_id, motivo, descripcion, imagenes } = req.body;
 
     // 1. Validaciones básicas
     if (!pedido_id) {
@@ -150,6 +172,13 @@ compradorRoute.post("/disputas",
       return res.status(400).json({
         success: false,
         message: "Debes proporcionar un motivo detallado para abrir la disputa."
+      });
+    }
+
+    if (!imagenes || !Array.isArray(imagenes) || imagenes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Debes adjuntar al menos una imagen como evidencia de la disputa."
       });
     }
 
@@ -194,12 +223,25 @@ compradorRoute.post("/disputas",
         vendedor_id: pedido.vendedor_id,
         admin_id: null, // Se asignará cuando un administrador tome el caso
         motivo: motivo.trim(),
+        descripcion: descripcion ? String(descripcion).trim() : null,
         estado: "abierta" // Definido por defecto en tu modelo, pero lo hacemos explícito
       }, { transaction: t });
 
       // B. Actualizar el estado del pedido a 'en_disputa'
       pedido.estado = "en_disputa";
       await pedido.save({ transaction: t });
+
+      // C. Registrar las imágenes de evidencia adjuntadas por el comprador
+      const datosImagenes = imagenes.map((img, index) => ({
+        disputa_id: nuevaDisputa.disputa_id,
+        url_imagen: img.url,
+        es_principal: img.es_principal !== undefined ? img.es_principal : (index === 0)
+      }));
+      const tienePrincipal = datosImagenes.some(img => img.es_principal === true);
+      if (!tienePrincipal && datosImagenes.length > 0) {
+        datosImagenes[0].es_principal = true;
+      }
+      const imagenesRegistradas = await DisputaImagen.bulkCreate(datosImagenes, { transaction: t });
 
       // Confirmar todos los cambios si todo salió bien
       await t.commit();
@@ -212,7 +254,9 @@ compradorRoute.post("/disputas",
           pedido_id: nuevaDisputa.pedido_id,
           estado_disputa: nuevaDisputa.estado,
           motivo: nuevaDisputa.motivo,
-          fecha_apertura: nuevaDisputa.fecha_apertura
+          descripcion: nuevaDisputa.descripcion,
+          fecha_apertura: nuevaDisputa.fecha_apertura,
+          imagenes: imagenesRegistradas.map(img => img.url_imagen)
         }
       });
 

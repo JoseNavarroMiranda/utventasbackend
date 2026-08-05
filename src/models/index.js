@@ -13,6 +13,9 @@ const Disputa = require('./Disputa')(sequelize);
 const RetiroVendedor = require('./RetiroVendedor')(sequelize);
 const HistoricoPedido = require('./HistoricoPedido')(sequelize);
 const TransaccionPremium = require('./TransaccionPremium')(sequelize);
+const SolicitudRelanzamiento = require('./SolicitudRelanzamiento')(sequelize);
+const SolicitudRelanzamientoImagen = require('./SolicitudRelanzamientoImagen')(sequelize);
+const DisputaImagen = require('./DisputaImagen')(sequelize);
 
 // --- DEFINICIÓN DE RELACIONES (ASOCIACIONES) ---
 
@@ -78,6 +81,23 @@ TransaccionPremium.belongsTo(Usuario, { foreignKey: 'usuario_id' });
 Producto.hasMany(TransaccionPremium, { foreignKey: 'producto_id', onDelete: 'SET NULL' });
 TransaccionPremium.belongsTo(Producto, { foreignKey: 'producto_id' });
 
+// Producto / Vendedor / Disputa <-> Solicitudes de Relanzamiento
+Producto.hasMany(SolicitudRelanzamiento, { foreignKey: 'producto_id', onDelete: 'CASCADE' });
+SolicitudRelanzamiento.belongsTo(Producto, { foreignKey: 'producto_id' });
+
+Usuario.hasMany(SolicitudRelanzamiento, { foreignKey: 'vendedor_id', as: 'SolicitudesRelanzamiento', onDelete: 'SET NULL' });
+SolicitudRelanzamiento.belongsTo(Usuario, { foreignKey: 'vendedor_id', as: 'Vendedor' });
+
+Disputa.hasMany(SolicitudRelanzamiento, { foreignKey: 'disputa_id', onDelete: 'SET NULL' });
+SolicitudRelanzamiento.belongsTo(Disputa, { foreignKey: 'disputa_id' });
+
+SolicitudRelanzamiento.hasMany(SolicitudRelanzamientoImagen, { foreignKey: 'solicitud_id', onDelete: 'CASCADE' });
+SolicitudRelanzamientoImagen.belongsTo(SolicitudRelanzamiento, { foreignKey: 'solicitud_id' });
+
+// Disputa <-> Imágenes de Evidencia (comprador)
+Disputa.hasMany(DisputaImagen, { foreignKey: 'disputa_id', onDelete: 'CASCADE' });
+DisputaImagen.belongsTo(Disputa, { foreignKey: 'disputa_id' });
+
 // Exportar base de datos y modelos
 module.exports = {
   sequelize,
@@ -90,5 +110,8 @@ module.exports = {
   Disputa,
   RetiroVendedor,
   HistoricoPedido,
-  TransaccionPremium
+  TransaccionPremium,
+  SolicitudRelanzamiento,
+  SolicitudRelanzamientoImagen,
+  DisputaImagen
 };

@@ -1,7 +1,7 @@
 const express = require("express");
 const vendedorRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
-const { Producto, Categoria, ProductoImagen, TransaccionPremium, Pedido, Usuario, RetiroVendedor, sequelize } = require("../../models");
+const { Producto, Categoria, ProductoImagen, TransaccionPremium, Pedido, Usuario, RetiroVendedor, SolicitudRelanzamiento, SolicitudRelanzamientoImagen, HistoricoPedido, sequelize } = require("../../models");
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
 const upload = require("../../middlewares/upload");
 
@@ -217,6 +217,16 @@ vendedorRoute.put(
       if (es_activo !== undefined) camposActualizar.es_activo = es_activo;
       if (contacto_telefono !== undefined) camposActualizar.contacto_telefono = contacto_telefono;
       if (contacto_metodo !== undefined) camposActualizar.contacto_metodo = contacto_metodo;
+
+      // 3.1 Una publicación suspendida tras un reembolso no puede reactivarse
+      // directamente; solo el administrador puede re-publicarla tras la solicitud.
+      if (producto.suspendido && es_activo === true) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "Esta publicación está suspendida tras un reembolso. Debes solicitar su relanzamiento para volver a ponerla en línea."
+        });
+      }
 
       // 4. Si actualizan la categoría por nombre
       if (categoria_nombre) {
@@ -910,6 +920,137 @@ vendedorRoute.get("/mis-retiros",
       success: true,
       data: retiros
     });
+  })
+);
+
+// =========================================================================
+// PUBLICACIONES SUSPENDIDAS (GET /api/vendedor/publicaciones-suspendidas)
+// =========================================================================
+// Productos del vendedor que quedaron suspendidos tras un reembolso y que
+// requieren una solicitud de relanzamiento para volver a estar en línea.
+// Incluye la última solicitud registrada para conocer su estatus.
+// =========================================================================
+vendedorRoute.get("/publicaciones-suspendidas",
+  proteger,
+  verificarRol(["Vendedor"]),
+  AsyncHandler(async (req, res) => {
+    const vendedorId = req.usuario.id;
+
+    const publicaciones = await Producto.findAll({
+      where: { usuario_id: vendedorId, suspendido: true },
+      include: [
+        {
+          model: Categoria,
+          as: "Categoria",
+          attributes: ["categoria_id", "nombre"]
+        },
+        {
+          model: ProductoImagen,
+          attributes: ["imagen_id", "url_imagen", "es_principal"]
+        },
+        {
+          model: SolicitudRelanzamiento,
+          attributes: ["solicitud_id", "descripcion", "estado", "resolucion_texto", "fecha_solicitud", "fecha_revision"],
+          include: [
+            {
+              model: SolicitudRelanzamientoImagen,
+              attributes: ["imagen_id", "url_imagen", "es_principal"]
+            }
+          ],
+          order: [["fecha_solicitud", "DESC"]],
+          limit: 1
+        }
+      ],
+      order: [["fecha_publicacion", "DESC"]]
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: publicaciones.length,
+      data: publicaciones
+    });
+  })
+);
+
+// =========================================================================
+// SOLICITAR RELANZAMIENTO (POST /api/vendedor/solicitar-relanzamiento)
+// =========================================================================
+// El vendedor describe el motivo y adjunta imágenes para pedir que su
+// publicación suspendida vuelva a estar en línea. El admin la revisa.
+// =========================================================================
+vendedorRoute.post("/solicitar-relanzamiento",
+  proteger,
+  verificarRol(["Vendedor"]),
+  AsyncHandler(async (req, res) => {
+    const vendedorId = req.usuario.id;
+    const { producto_id, descripcion, imagenes } = req.body;
+
+    if (!producto_id) {
+      return res.status(400).json({ success: false, message: "El ID del producto es obligatorio." });
+    }
+    if (!descripcion || descripcion.trim() === "") {
+      return res.status(400).json({ success: false, message: "Debes escribir una descripción explicando por qué debe relanzarse la publicación." });
+    }
+
+    const producto = await Producto.findByPk(producto_id);
+    if (!producto) {
+      return res.status(404).json({ success: false, message: "El producto no existe." });
+    }
+    if (producto.usuario_id !== vendedorId) {
+      return res.status(403).json({ success: false, message: "No tienes permisos sobre esta publicación." });
+    }
+    if (!producto.suspendido) {
+      return res.status(400).json({ success: false, message: "Esta publicación no está suspendida; no requiere relanzamiento." });
+    }
+
+    const solicitudPendiente = await SolicitudRelanzamiento.findOne({
+      where: { producto_id, estado: "pendiente" }
+    });
+    if (solicitudPendiente) {
+      return res.status(400).json({ success: false, message: "Ya existe una solicitud de relanzamiento pendiente para esta publicación." });
+    }
+
+    const transaction = await sequelize.transaction();
+    try {
+      const nuevaSolicitud = await SolicitudRelanzamiento.create({
+        producto_id,
+        vendedor_id: vendedorId,
+        descripcion: descripcion.trim(),
+        estado: "pendiente"
+      }, { transaction });
+
+      if (imagenes && Array.isArray(imagenes) && imagenes.length > 0) {
+        const datosImagenes = imagenes.map((img, index) => ({
+          solicitud_id: nuevaSolicitud.solicitud_id,
+          url_imagen: img.url,
+          es_principal: img.es_principal !== undefined ? img.es_principal : (index === 0)
+        }));
+        const tienePrincipal = datosImagenes.some(img => img.es_principal === true);
+        if (!tienePrincipal && datosImagenes.length > 0) {
+          datosImagenes[0].es_principal = true;
+        }
+        await SolicitudRelanzamientoImagen.bulkCreate(datosImagenes, { transaction });
+      }
+
+      await HistoricoPedido.create({
+        estado_anterior: null,
+        estado_nuevo: "solicitud_relanzamiento",
+        usuario_accion_id: vendedorId,
+        notes_auditoria: `Solicitud de relanzamiento para el producto #${producto_id}: ${descripcion.trim().slice(0, 200)}`
+      }, { transaction });
+
+      await transaction.commit();
+
+      return res.status(201).json({
+        success: true,
+        message: "Solicitud de relanzamiento enviada. Un administrador la revisará.",
+        data: { solicitud_id: nuevaSolicitud.solicitud_id, estado: nuevaSolicitud.estado }
+      });
+    } catch (error) {
+      if (transaction && !transaction.finished) await transaction.rollback();
+      console.error("Error al solicitar relanzamiento:", error);
+      return res.status(500).json({ success: false, message: "Error interno al enviar la solicitud de relanzamiento." });
+    }
   })
 );
 

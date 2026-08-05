@@ -1,59 +1,54 @@
 const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
-  return sequelize.define('Disputa', {
-    disputa_id: {
+  return sequelize.define('SolicitudRelanzamiento', {
+    solicitud_id: {
       type: DataTypes.INTEGER,
       primaryKey: true,
       autoIncrement: true
     },
-    pedido_id: {
+    producto_id: {
       type: DataTypes.INTEGER,
-      unique: true,
-      allowNull: true
-    },
-    comprador_id: {
-      type: DataTypes.INTEGER,
-      allowNull: true
+      allowNull: false
     },
     vendedor_id: {
       type: DataTypes.INTEGER,
       allowNull: true
     },
-    admin_id: {
+    disputa_id: {
       type: DataTypes.INTEGER,
       allowNull: true
     },
-    motivo: {
+    descripcion: {
       type: DataTypes.TEXT,
       allowNull: false
     },
-    descripcion: {
-      type: DataTypes.TEXT,
-      allowNull: true
-    },
     estado: {
-      type: DataTypes.STRING(30),
-      defaultValue: 'abierta',
+      type: DataTypes.STRING(20),
+      defaultValue: 'pendiente',
       validate: {
-        isIn: [['abierta', 'en_investigacion', 'resuelta_reembolso', 'resuelta_pago_vendedor', 'cerrada_sin_cambios']]
+        isIn: [['pendiente', 'aprobada', 'rechazada']]
       }
     },
     resolucion_texto: {
       type: DataTypes.TEXT,
       allowNull: true
     },
-    fecha_apertura: {
+    admin_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true
+    },
+    fecha_solicitud: {
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW
     },
-    fecha_resolucion: {
+    fecha_revision: {
       type: DataTypes.DATE,
       allowNull: true,
       defaultValue: null
     }
   }, {
-    tableName: 'disputas',
+    tableName: 'solicitudes_relanzamiento',
     timestamps: false
   });
 };

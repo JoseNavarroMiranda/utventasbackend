@@ -1,7 +1,7 @@
 const express = require("express");
 const adminRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
-const { sequelize, Usuario, Rol, Categoria, Pedido, Disputa, HistoricoPedido, Producto, RetiroVendedor } = require('../../models');
+const { sequelize, Usuario, Rol, Categoria, Pedido, Disputa, HistoricoPedido, Producto, ProductoImagen, RetiroVendedor, SolicitudRelanzamiento, SolicitudRelanzamientoImagen, DisputaImagen } = require('../../models');
 const { Op } = require('sequelize');
 const bcrypt = require('bcrypt'); // 🔑 Asegúrate de tener instalado bcrypt
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
@@ -249,7 +249,30 @@ adminRoute.get("/disputas",
                     {
                         model: Pedido,
                         include: [
-                            Producto,
+                            {
+                                model: Producto,
+                                attributes: [
+                                    "producto_id",
+                                    "titulo",
+                                    "descripcion",
+                                    "precio",
+                                    "contacto_metodo",
+                                    "contacto_telefono",
+                                    "es_activo",
+                                    "fecha_publicacion"
+                                ],
+                                include: [
+                                    {
+                                        model: Categoria,
+                                        as: "Categoria",
+                                        attributes: ["categoria_id", "nombre"]
+                                    },
+                                    {
+                                        model: ProductoImagen,
+                                        attributes: ["imagen_id", "url_imagen", "es_principal"]
+                                    }
+                                ]
+                            },
                             {
                                 model: HistoricoPedido,
                                 include: [{ model: Usuario, as: "UsuarioAccion" }]
@@ -263,6 +286,10 @@ adminRoute.get("/disputas",
                     {
                         model: Usuario,
                         as: "Vendedor"
+                    },
+                    {
+                        model: DisputaImagen,
+                        attributes: ["imagen_id", "url_imagen", "es_principal"]
                     }
                 ]
             });
@@ -365,6 +392,23 @@ adminRoute.put("/disputas/:disputa_id/resolver",
         }, { transaction });
 
         await pedido.update({ estado: "cancelado_reembolsado" }, { transaction });
+
+        // La publicación queda SUSPENDIDA: el vendedor deberá solicitarla relanzar
+        // para que vuelva a estar disponible para otro comprador.
+        if (pedido.producto_id) {
+          await Producto.update(
+            { es_activo: false, suspendido: true },
+            { where: { producto_id: pedido.producto_id }, transaction }
+          );
+        }
+
+        await HistoricoPedido.create({
+          pedido_id: pedido.pedido_id,
+          estado_anterior: "en_disputa",
+          estado_nuevo: "cancelado_reembolsado",
+          usuario_accion_id: adminId,
+          notes_auditoria: `Reembolso al comprador aprobado por el administrador. Publicación suspendida. ${resolucion_texto.trim()}`
+        }, { transaction });
       } else {
         await disputa.update({
           estado: "resuelta_pago_vendedor",
@@ -374,6 +418,14 @@ adminRoute.put("/disputas/:disputa_id/resolver",
         }, { transaction });
 
         await pedido.update({ estado: "entregado_completado" }, { transaction });
+
+        await HistoricoPedido.create({
+          pedido_id: pedido.pedido_id,
+          estado_anterior: "en_disputa",
+          estado_nuevo: "entregado_completado",
+          usuario_accion_id: adminId,
+          notes_auditoria: `Disputa resuelta a favor del vendedor. Fondos liberados. ${resolucion_texto.trim()}`
+        }, { transaction });
       }
 
       await transaction.commit();
@@ -679,7 +731,116 @@ adminRoute.get("/kpis-ventas",
   })
 );
 
+// =========================================================================
+// 12. LISTAR SOLICITUDES DE RELANZAMIENTO (GET /api/admin/relanzamientos)
+// =========================================================================
+// Solicitudes del vendedor para volver a poner en línea una publicación
+// suspendida tras un reembolso. Incluye producto, vendedor e imágenes.
+// =========================================================================
+adminRoute.get("/relanzamientos",
+  proteger,
+  verificarRol(["Administrador"]),
+  AsyncHandler(async (req, res) => {
+    try {
+      const solicitudes = await SolicitudRelanzamiento.findAll({
+        include: [
+          {
+            model: Producto,
+            attributes: [
+              "producto_id",
+              "titulo",
+              "descripcion",
+              "precio",
+              "es_activo",
+              "suspendido",
+              "fecha_publicacion"
+            ],
+            include: [
+              { model: Categoria, as: "Categoria", attributes: ["categoria_id", "nombre"] },
+              { model: ProductoImagen, attributes: ["imagen_id", "url_imagen", "es_principal"] }
+            ]
+          },
+          { model: Usuario, as: "Vendedor", attributes: ["usuario_id", "nombre", "correo"] },
+          { model: SolicitudRelanzamientoImagen, attributes: ["imagen_id", "url_imagen", "es_principal"] }
+        ],
+        order: [["fecha_solicitud", "DESC"]]
+      });
 
+      return res.status(200).json({ success: true, data: solicitudes });
+    } catch (error) {
+      console.error("Error al listar solicitudes de relanzamiento:", error);
+      return res.status(500).json({ success: false, message: "Error interno al consultar las solicitudes de relanzamiento" });
+    }
+  })
+);
 
+// =========================================================================
+// 13. REVISAR SOLICITUD DE RELANZAMIENTO (PUT /api/admin/relanzamientos/:solicitud_id/revisar)
+// =========================================================================
+// Aprobar: la publicación vuelve a estar activa para que otro comprador
+// pueda comprarla. Rechazar: permanece suspendida.
+// =========================================================================
+adminRoute.put("/relanzamientos/:solicitud_id/revisar",
+  proteger,
+  verificarRol(["Administrador"]),
+  AsyncHandler(async (req, res) => {
+    const adminId = req.usuario.id;
+    const { solicitud_id } = req.params;
+    const { aprobada, resolucion_texto } = req.body;
+
+    if (typeof aprobada !== "boolean") {
+      return res.status(400).json({ success: false, message: "El campo 'aprobada' (booleano) es obligatorio." });
+    }
+    if (!resolucion_texto || resolucion_texto.trim() === "") {
+      return res.status(400).json({ success: false, message: "Debes redactar una resolución para revisar la solicitud." });
+    }
+
+    const solicitud = await SolicitudRelanzamiento.findByPk(solicitud_id, { include: [Producto] });
+    if (!solicitud) {
+      return res.status(404).json({ success: false, message: "La solicitud de relanzamiento no existe." });
+    }
+    if (solicitud.estado !== "pendiente") {
+      return res.status(400).json({ success: false, message: "Esta solicitud ya fue revisada previamente." });
+    }
+
+    const transaction = await sequelize.transaction();
+    try {
+      if (aprobada) {
+        await solicitud.update({
+          estado: "aprobada",
+          resolucion_texto: resolucion_texto.trim(),
+          admin_id: adminId,
+          fecha_revision: new Date()
+        }, { transaction });
+
+        if (solicitud.producto_id) {
+          await Producto.update(
+            { es_activo: true, suspendido: false },
+            { where: { producto_id: solicitud.producto_id }, transaction }
+          );
+        }
+      } else {
+        await solicitud.update({
+          estado: "rechazada",
+          resolucion_texto: resolucion_texto.trim(),
+          admin_id: adminId,
+          fecha_revision: new Date()
+        }, { transaction });
+      }
+
+      await transaction.commit();
+      return res.status(200).json({
+        success: true,
+        message: aprobada
+          ? "Solicitud aprobada. La publicación volvió a estar en línea."
+          : "Solicitud rechazada. La publicación permanece suspendida."
+      });
+    } catch (error) {
+      if (transaction && !transaction.finished) await transaction.rollback();
+      console.error("Error al revisar solicitud de relanzamiento:", error);
+      return res.status(500).json({ success: false, message: "Error interno al procesar la revisión." });
+    }
+  })
+);
 
 module.exports = adminRoute;

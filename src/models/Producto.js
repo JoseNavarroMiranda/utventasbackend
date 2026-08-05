@@ -32,6 +32,10 @@ module.exports = (sequelize) => {
       type: DataTypes.BOOLEAN,
       defaultValue: true
     },
+    suspendido: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false
+    },
     contacto_telefono: {
       type: DataTypes.STRING(20),
       allowNull: false

@@ -110,7 +110,9 @@ productoRoute.get(
     try {
       const pedidos = await Pedido.findAll({
         where: {
-          estado: ['pendiente_pago', 'pagado_escrow']
+          // Solo ventas confirmadas (fondos en escrow). Un pedido 'pendiente_pago'
+          // abandonado NO debe marcar el producto como "en proceso" para los demás.
+          estado: ['pagado_escrow']
         },
         attributes: ['producto_id'],
         group: ['producto_id']

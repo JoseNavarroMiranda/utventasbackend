@@ -1,6 +1,7 @@
 const express = require("express");
 const pedidoRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
+const { Op } = require("sequelize");
 const { Pedido, Producto, HistoricoPedido, Usuario, sequelize } = require('../../models');
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
 const nodemailer = require("nodemailer");
@@ -30,6 +31,23 @@ const obtenerPaypalAccessToken = async () => {
   return data.access_token;
 };
 
+// Best effort: anula una autorización de PayPal que ya no se utilizará
+// (por ejemplo, cuando el producto fue comprado por otro cliente primero).
+const anularAutorizacionPaypal = async (authorizationId) => {
+  try {
+    const accessToken = await obtenerPaypalAccessToken();
+    await fetch(`${process.env.PAYPAL_API_URL}/v2/payments/authorizations/${authorizationId}/void`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      }
+    });
+  } catch (error) {
+    console.error("No se pudo anular la autorización de PayPal:", error.message);
+  }
+};
+
 // =========================================================================
 // API GENERAR PEDIDO - ESCROW CON NOTIFICACIÓN (POST /api/pedidos/)
 // =========================================================================
@@ -55,53 +73,45 @@ pedidoRoute.post(
       return res.status(400).json({ success: false, message: "Este producto ya no se encuentra disponible" });
     }
 
-    const pedidoExistente = await Pedido.findOne({
-      where: {
-        producto_id,
-        estado: ['pendiente_pago', 'pagado_escrow']
-      }
-    });
-    if (pedidoExistente) {
-      return res.status(400).json({ success: false, message: 'Este producto ya tiene un pedido activo en proceso' });
-    }
-
     if (producto.usuario_id === compradorId) {
       return res.status(400).json({ success: false, message: "No puedes comprar tu propio artículo" });
     }
 
-    // Obtener los datos del comprador (especialmente su correo)
-    const comprador = await Usuario.findByPk(compradorId);
-    if (!comprador) {
-      return res.status(404).json({ success: false, message: "Usuario comprador no encontrado" });
+    // 2. Solo se bloquea el producto si la venta YA está confirmada (fondos en escrow).
+    // Un checkout abandonado NO debe dejar el producto en "pendiente_pago" ni impedir
+    // que otro cliente lo compre: aquí NO se crea el pedido ni se desactiva el producto.
+    const ventaEnProceso = await Pedido.findOne({
+      where: {
+        producto_id,
+        estado: ['pagado_escrow', 'en_disputa']
+      }
+    });
+    if (ventaEnProceso) {
+      return res.status(400).json({ success: false, message: 'Este producto ya fue comprado y está en proceso de entrega' });
     }
 
-    const transaction = await sequelize.transaction();
-
     try {
-      // 2. Conectarse a PayPal con intención AUTHORIZE (Escrow)
+      // 3. Conectarse a PayPal con intención AUTHORIZE (Escrow)
       const accessToken = await obtenerPaypalAccessToken();
-      
-      const paypalOrderPayload = {
-          intent: "AUTHORIZE", 
-          purchase_units: [
-            {
-              amount: {
-                // currency_code: "USD", 
-                currency_code: "MXN", 
-                value: parseFloat(producto.precio).toFixed(2)
-              },
-              description: `Compra en UTVentas: ${producto.titulo}`
-            }
-          ],
-          // 🔑 AÑADE ESTE BLOQUE PARA EVITAR EL BUCLE EN EL NAVEGADOR
-          application_context: {
-            return_url: "https://example.com/success", // URL a la que irá el frontend si el usuario acepta
-            cancel_url: "https://example.com/cancel",  // URL a la que irá si cancela
-            user_action: "CONTINUE", // Cambia el texto del botón final en PayPal a algo claro
-            shipping_preference: "NO_SHIPPING" // Oculta el bloque de dirección de envío, ya que es entrega en campus
-          }
-        };
 
+      const paypalOrderPayload = {
+        intent: "AUTHORIZE",
+        purchase_units: [
+          {
+            amount: {
+              currency_code: "MXN",
+              value: parseFloat(producto.precio).toFixed(2)
+            },
+            description: `Compra en UTVentas: ${producto.titulo}`
+          }
+        ],
+        application_context: {
+          return_url: "https://example.com/success",
+          cancel_url: "https://example.com/cancel",
+          user_action: "CONTINUE",
+          shipping_preference: "NO_SHIPPING"
+        }
+      };
 
       const responsePaypal = await fetch(`${process.env.PAYPAL_API_URL}/v2/checkout/orders`, {
         method: "POST",
@@ -115,7 +125,6 @@ pedidoRoute.post(
       const orderPaypal = await responsePaypal.json();
 
       if (!orderPaypal.id) {
-        await transaction.rollback();
         return res.status(500).json({
           success: false,
           message: "Error al comunicarse con la pasarela de PayPal",
@@ -123,99 +132,19 @@ pedidoRoute.post(
         });
       }
 
-      // 3. Generar PIN de entrega aleatorio de 6 dígitos
-      const pinEntrega = Math.floor(100000 + Math.random() * 900000).toString();
-
-      // 4. Crear el Pedido en la Base de Datos
-      const nuevoPedido = await Pedido.create({
-        producto_id: producto.producto_id,
-        comprador_id: compradorId,
-        vendedor_id: producto.usuario_id,
-        precio_final: producto.precio,
-        estado: 'pendiente_pago',
-        paypal_order_id: orderPaypal.id,
-        paypal_capture_id: null,
-        token_entrega: pinEntrega
-      }, { transaction });
-
-      // Desactivar producto para evitar doble venta
-      await Producto.update(
-        { es_activo: false },
-        { where: { producto_id: producto.producto_id }, transaction }
-      );
-
-      // 5. Registrar en el Histórico de Auditoría
-      await HistoricoPedido.create({
-        pedido_id: nuevoPedido.pedido_id,
-        estado_anterior: null,
-        estado_nuevo: 'pendiente_pago',
-        usuario_accion_id: compradorId,
-        notes_auditoria: `Pedido generado e email de confirmación encolado.`
-      }, { transaction });
-
-      // Confirmamos los datos en la BD antes de enviar el correo
-      await transaction.commit();
-
-      // 6. ENVIAR CORREO ELECTRÓNICO AL COMPRADOR
-      const opcionesCorreo = {
-        from: `"UTJ Marketplace" <${process.env.EMAIL_USER}>`,
-        to: comprador.correo,
-        subject: `🔑 PIN de Entrega para tu compra: ${producto.titulo}`,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
-            <h2 style="color: #2c3e50; text-align: center;">¡Tu pedido ha sido inicializado!</h2>
-            <p>Hola <strong>${comprador.nombre}</strong>,</p>
-            <p>Has iniciado el proceso de compra para el siguiente artículo en el marketplace de la UTJ:</p>
-            
-            <div style="background-color: #f9f9f9; padding: 15px; border-left: 5px solid #3498db; margin: 20px 0;">
-              <h3 style="margin-top: 0; color: #2980b9;">${producto.titulo}</h3>
-              <p style="margin: 5px 0;"><strong>Precio:</strong> $${producto.precio} MXN</p>
-              <p style="margin: 5px 0;"><strong>Descripción:</strong> ${producto.descripcion}</p>
-            </div>
-
-            <p style="text-align: center; margin-top: 25px;">
-              <strong>IMPORTANTE:</strong> Una vez que completes tu pago en PayPal, reúnete con el vendedor en el campus para revisar el producto. Si estás conforme con la entrega, preséntale el siguiente PIN:
-            </p>
-
-            <div style="background-color: #e74c3c; color: white; text-align: center; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 5px; border-radius: 5px; margin: 20px 0;">
-              ${pinEntrega}
-            </div>
-
-            <p style="font-size: 12px; color: #7f8c8d; text-align: center;">
-              * No compartas este PIN con nadie hasta que tengas el producto físicamente en tus manos y estés satisfecho.
-            </p>
-          </div>
-        `
-      };
-
-      // Enviamos el correo de forma asíncrona sin bloquear la respuesta HTTP de la API
-      transporreCorreo.sendMail(opcionesCorreo, (errorMail, info) => {
-        if (errorMail) {
-          console.error("Error no crítico al mandar el correo del PIN:", errorMail);
-        } else {
-          console.log("Correo con PIN enviado exitosamente: " + info.response);
-        }
-      });
-
-      const approveLink = orderPaypal.links.find(link => link.rel === "payer-action" || link.rel === "approve");
-
+      // 4. El pedido se registra en la BD únicamente cuando el comprador confirma
+      // el pago en PayPal (ver PUT /confirmar-retencion). Si abandona el modal,
+      // el producto sigue disponible en el dashboard para cualquier otro cliente.
       return res.status(201).json({
         success: true,
-        message: "Pedido generado exitosamente. Se ha enviado un correo con tu PIN de entrega.",
+        message: "Orden de PayPal generada. Confirma el pago en PayPal para finalizar tu compra.",
         data: {
-          pedido_id: nuevoPedido.pedido_id,
-          paypal_order_id: nuevoPedido.paypal_order_id,
-          precio_final: nuevoPedido.precio_final,
-          token_entrega: nuevoPedido.token_entrega,
-          paypal_approve_url: approveLink ? approveLink.href : null
+          paypal_order_id: orderPaypal.id
         }
       });
 
     } catch (error) {
-      if (transaction && !transaction.finished) {
-        await transaction.rollback();
-      }
-      console.error("Error crítico al generar pedido escrow con correo:", error);
+      console.error("Error crítico al generar orden de PayPal:", error);
       return res.status(500).json({
         success: false,
         message: "Error interno del servidor al procesar el pedido"
@@ -227,34 +156,64 @@ pedidoRoute.post(
 // =========================================================================
 // CONFIRMAR RETENCIÓN EN ESCROW (PUT /api/pedidos/confirmar-retencion)
 // =========================================================================
-// El comprador regresa de PayPal, el backend autoriza la orden para congelar
-// los fondos y guarda el 'paypal_capture_id' (que aquí funge como el Authorization ID).
+// El comprador confirma el pago en PayPal. Solo en este momento se registra
+// el Pedido en la BD (con su PIN), se desactiva el producto y se congelan los
+// fondos (authorize). Si el comprador abandona el Pago en PayPal, nunca llega
+// aquí y el producto sigue disponible en el dashboard para otros clientes.
 // =========================================================================
 pedidoRoute.put(
   "/confirmar-retencion",
   proteger,
   verificarRol(["Comprador"]),
   AsyncHandler(async (req, res) => {
-    const { paypal_order_id } = req.body;
+    const { paypal_order_id, producto_id } = req.body;
+    const compradorId = req.usuario.id;
 
     if (!paypal_order_id) {
       return res.status(400).json({ success: false, message: "El paypal_order_id es requerido" });
     }
 
-    // Buscar el pedido correspondiente
-    const pedido = await Pedido.findOne({ where: { paypal_order_id } });
-    if (!pedido) {
-      return res.status(404).json({ success: false, message: "Pedido no encontrado" });
+    // 1. Pedido ya registrado (compatibilidad con pedidos generados antes del cambio)
+    const pedidoExistente = await Pedido.findOne({ where: { paypal_order_id } });
+
+    let producto;
+    if (pedidoExistente) {
+      producto = await Producto.findByPk(pedidoExistente.producto_id);
+    } else {
+      if (!producto_id) {
+        return res.status(400).json({ success: false, message: "El producto_id es requerido para confirmar el pago" });
+      }
+      producto = await Producto.findByPk(producto_id);
+      if (!producto) {
+        return res.status(404).json({ success: false, message: "El producto no existe" });
+      }
+      if (!producto.es_activo) {
+        return res.status(400).json({ success: false, message: "Este producto ya no se encuentra disponible" });
+      }
+      if (producto.usuario_id === compradorId) {
+        return res.status(400).json({ success: false, message: "No puedes comprar tu propio artículo" });
+      }
     }
 
-    if (pedido.estado !== "pendiente_pago") {
+    if (pedidoExistente && pedidoExistente.estado !== "pendiente_pago") {
       return res.status(400).json({ success: false, message: "El pedido no está en estado pendiente de pago" });
     }
 
-    const transaction = await sequelize.transaction();
-    try {
-      let authorizationId;
+    // 2. Pre-chequeo: ¿el producto ya fue comprado por otro cliente?
+    const ventaPrevia = await Pedido.findOne({
+      where: {
+        producto_id: producto.producto_id,
+        estado: ['pagado_escrow', 'en_disputa', 'entregado_completado'],
+        paypal_order_id: { [Op.ne]: paypal_order_id }
+      }
+    });
+    if (ventaPrevia) {
+      return res.status(400).json({ success: false, message: "Este producto ya fue comprado por otro cliente" });
+    }
 
+    // 3. Autorizar la orden en PayPal para congelar los fondos
+    let authorizationId;
+    try {
       const accessToken = await obtenerPaypalAccessToken();
       const urlAuthorize = `${process.env.PAYPAL_API_URL}/v2/checkout/orders/${paypal_order_id}/authorize`;
       const responsePaypal = await fetch(urlAuthorize, {
@@ -267,7 +226,6 @@ pedidoRoute.put(
       const datosAutorizacion = await responsePaypal.json();
 
       if (!responsePaypal.ok || datosAutorizacion.status !== "COMPLETED") {
-        await transaction.rollback();
         return res.status(400).json({
           success: false,
           message: "El pago no fue autorizado por PayPal. El comprador debe completar la aprobación con su cuenta.",
@@ -277,30 +235,123 @@ pedidoRoute.put(
 
       authorizationId = datosAutorizacion.purchase_units?.[0]?.payments?.authorizations?.[0]?.id;
       if (!authorizationId) {
-        await transaction.rollback();
         return res.status(400).json({
           success: false,
           message: "PayPal no devolvió la autorización del pago"
         });
       }
+    } catch (error) {
+      console.error("Error al autorizar el pago en PayPal:", error);
+      return res.status(500).json({ success: false, message: "Error interno al procesar el depósito en garantía" });
+    }
 
-      // Actualizar Pedido
-      const estadoAnterior = pedido.estado;
-      await pedido.update({
-        estado: "pagado_escrow",
-        paypal_capture_id: authorizationId // Guardamos el ID de autorización aquí para usarlo al capturar
-      }, { transaction });
+    // 4. Persistir el pedido únicamente cuando el pago fue autorizado
+    const transaction = await sequelize.transaction();
+    try {
+      // Bloqueamos la fila del producto para serializar confirmaciones simultáneas
+      await Producto.findByPk(producto.producto_id, { transaction, lock: transaction.LOCK.UPDATE });
+
+      const ventaConfirmada = await Pedido.findOne({
+        where: {
+          producto_id: producto.producto_id,
+          estado: ['pagado_escrow', 'en_disputa', 'entregado_completado'],
+          paypal_order_id: { [Op.ne]: paypal_order_id }
+        },
+        transaction
+      });
+
+      if (ventaConfirmada) {
+        await transaction.rollback();
+        await anularAutorizacionPaypal(authorizationId);
+        return res.status(400).json({
+          success: false,
+          message: "Este producto ya fue comprado por otro cliente. Se liberó tu pago en PayPal."
+        });
+      }
+
+      let pedido;
+      if (pedidoExistente) {
+        const estadoAnterior = pedidoExistente.estado;
+        await pedidoExistente.update({
+          estado: "pagado_escrow",
+          paypal_capture_id: authorizationId
+        }, { transaction });
+        pedido = pedidoExistente;
+      } else {
+        // Generar PIN de entrega aleatorio de 6 dígitos
+        const pinEntrega = Math.floor(100000 + Math.random() * 900000).toString();
+
+        pedido = await Pedido.create({
+          producto_id: producto.producto_id,
+          comprador_id: compradorId,
+          vendedor_id: producto.usuario_id,
+          precio_final: producto.precio,
+          estado: 'pagado_escrow',
+          paypal_order_id,
+          paypal_capture_id: authorizationId,
+          token_entrega: pinEntrega
+        }, { transaction });
+      }
+
+      // El producto se desactiva únicamente cuando el pago fue confirmado
+      await Producto.update(
+        { es_activo: false },
+        { where: { producto_id: producto.producto_id }, transaction }
+      );
 
       // Registrar Histórico
       await HistoricoPedido.create({
         pedido_id: pedido.pedido_id,
-        estado_anterior: estadoAnterior,
+        estado_anterior: pedidoExistente ? 'pendiente_pago' : null,
         estado_nuevo: "pagado_escrow",
-        usuario_accion_id: req.usuario.id,
+        usuario_accion_id: compradorId,
         notes_auditoria: "Fondos congelados exitosamente vía PayPal Escrow. En espera de intercambio físico."
       }, { transaction });
 
       await transaction.commit();
+
+      // 5. Enviar el PIN de entrega al comprador (solo tras el pago confirmado)
+      const comprador = await Usuario.findByPk(compradorId);
+      if (comprador) {
+        const opcionesCorreo = {
+          from: `"UTJ Marketplace" <${process.env.EMAIL_USER}>`,
+          to: comprador.correo,
+          subject: `🔑 PIN de Entrega para tu compra: ${producto.titulo}`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+              <h2 style="color: #2c3e50; text-align: center;">¡Tu pago ha sido confirmado!</h2>
+              <p>Hola <strong>${comprador.nombre}</strong>,</p>
+              <p>Tu pago por el siguiente artículo en el marketplace de la UTJ fue confirmado y los fondos están en garantía:</p>
+
+              <div style="background-color: #f9f9f9; padding: 15px; border-left: 5px solid #3498db; margin: 20px 0;">
+                <h3 style="margin-top: 0; color: #2980b9;">${producto.titulo}</h3>
+                <p style="margin: 5px 0;"><strong>Precio:</strong> $${producto.precio} MXN</p>
+              </div>
+
+              <p style="text-align: center; margin-top: 25px;">
+                <strong>IMPORTANTE:</strong> Reúnete con el vendedor en el campus para revisar el producto. Si estás conforme con la entrega, preséntale el siguiente PIN:
+              </p>
+
+              <div style="background-color: #e74c3c; color: white; text-align: center; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 5px; border-radius: 5px; margin: 20px 0;">
+                ${pedido.token_entrega}
+              </div>
+
+              <p style="font-size: 12px; color: #7f8c8d; text-align: center;">
+                * No compartas este PIN con nadie hasta que tengas el producto físicamente en tus manos y estés satisfecho.
+              </p>
+            </div>
+          `
+        };
+
+        transporreCorreo.sendMail(opcionesCorreo, (errorMail, info) => {
+          if (errorMail) {
+            console.error("Error no crítico al mandar el correo del PIN:", errorMail);
+          } else {
+            console.log("Correo con PIN enviado exitosamente: " + info.response);
+          }
+        });
+      }
+
       return res.status(200).json({
         success: true,
         message: "Fondos congelados de forma segura en Escrow. El pedido está listo para ser entregado.",
