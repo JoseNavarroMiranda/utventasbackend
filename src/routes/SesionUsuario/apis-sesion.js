@@ -17,11 +17,14 @@ const normalizarCorreo = (valor) =>
 
 // Configuración del transportador de Nodemailer (usa variables de entorno de tu .env)
 const transporter = nodemailer.createTransport({
-    service: 'gmail', // Puedes cambiarlo por tu proveedor SMTP (Outlook, Gmail, etc.)
+    host: 'smtp.gmail.com', // Puedes cambiarlo por tu proveedor SMTP (Outlook, Gmail, etc.)
+    port: 465,
+    secure: true,
     auth: {
         user: process.env.EMAIL_USER, // Tu correo de envíos (ej: utventas.soporte@gmail.com)
         pass: process.env.EMAIL_PASS  // Tu contraseña de aplicación (App Password)
-    }
+    },
+    connectionTimeout: 10000
 });
 
 // ==========================================

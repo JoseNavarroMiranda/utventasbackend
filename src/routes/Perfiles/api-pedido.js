@@ -9,11 +9,14 @@ require('dotenv').config();
 
 // Configuración del transportador de Nodemailer
 const transporreCorreo = nodemailer.createTransport({
-  service: "gmail", // Puedes cambiarlo por el host de tu proveedor si no usas Gmail
+  host: "smtp.gmail.com", // Puedes cambiarlo por el host de tu proveedor si no usas Gmail
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  }
+  },
+  connectionTimeout: 10000
 });
 
 // Helper para autenticarse con la API de PayPal Sandbox
