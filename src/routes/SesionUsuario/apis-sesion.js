@@ -18,14 +18,13 @@ const normalizarCorreo = (valor) =>
 // Configuración del transportador de Nodemailer con Brevo (SMTP Relay)
 const transporter = nodemailer.createTransport({
     host: 'smtp-relay.brevo.com',
-    port: 587,
-    secure: false,
-    requireTLS: true,
+    port: 465,
+    secure: true,
     auth: {
         user: process.env.EMAIL_USER, // Correo verificado como remitente en Brevo
         pass: process.env.EMAIL_PASS  // API Key SMTP de Brevo
     },
-    connectionTimeout: 10000
+    connectionTimeout: 30000
 });
 
 // ==========================================
