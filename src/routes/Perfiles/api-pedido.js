@@ -7,14 +7,15 @@ const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
 const nodemailer = require("nodemailer");
 require('dotenv').config();
 
-// Configuración del transportador de Nodemailer
+// Configuración del transportador de Nodemailer con Brevo (SMTP Relay)
 const transporreCorreo = nodemailer.createTransport({
-  host: "smtp.gmail.com", // Puedes cambiarlo por el host de tu proveedor si no usas Gmail
-  port: 465,
-  secure: true,
+  host: "smtp-relay.brevo.com",
+  port: 587,
+  secure: false,
+  requireTLS: true,
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+    user: process.env.EMAIL_USER, // Correo verificado como remitente en Brevo
+    pass: process.env.EMAIL_PASS  // API Key SMTP de Brevo
   },
   connectionTimeout: 10000
 });
@@ -354,7 +355,7 @@ pedidoRoute.put(
       const comprador = await Usuario.findByPk(compradorId);
       if (comprador) {
         const opcionesCorreo = {
-          from: `"UTJ Marketplace" <${process.env.EMAIL_USER}>`,
+          from: `"UTJ Marketplace" <${process.env.EMAIL_FROM}>`,
           to: comprador.correo,
           subject: `🔑 PIN de Entrega para tu compra: ${producto.titulo}`,
           html: `

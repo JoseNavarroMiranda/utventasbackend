@@ -15,14 +15,15 @@ const codigosTemporales = {};
 const normalizarCorreo = (valor) =>
     typeof valor === "string" ? valor.trim().toLowerCase() : "";
 
-// Configuración del transportador de Nodemailer (usa variables de entorno de tu .env)
+// Configuración del transportador de Nodemailer con Brevo (SMTP Relay)
 const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com', // Puedes cambiarlo por tu proveedor SMTP (Outlook, Gmail, etc.)
-    port: 465,
-    secure: true,
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
+    requireTLS: true,
     auth: {
-        user: process.env.EMAIL_USER, // Tu correo de envíos (ej: utventas.soporte@gmail.com)
-        pass: process.env.EMAIL_PASS  // Tu contraseña de aplicación (App Password)
+        user: process.env.EMAIL_USER, // Correo verificado como remitente en Brevo
+        pass: process.env.EMAIL_PASS  // API Key SMTP de Brevo
     },
     connectionTimeout: 10000
 });
@@ -69,7 +70,7 @@ usuarioRoute.post("/solicitar-codigo", AsyncHandler(async (req, res) => {
 
     // Plantilla de correo para el estudiante
     const mailOptions = {
-        from: `"UTVentas Soporte" <${process.env.EMAIL_USER}>`,
+        from: `"UTVentas Soporte" <${process.env.EMAIL_FROM}>`,
         to: correo,
         subject: "Código de Verificación - UTVentas",
         html: `
