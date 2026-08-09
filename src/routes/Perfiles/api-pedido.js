@@ -4,20 +4,8 @@ const AsyncHandler = require("express-async-handler");
 const { Op } = require("sequelize");
 const { Pedido, Producto, HistoricoPedido, Usuario, sequelize } = require('../../models');
 const { proteger, verificarRol } = require("../../middlewares/authMiddleware");
-const nodemailer = require("nodemailer");
+const { enviarCorreo } = require("../../config/brevo");
 require('dotenv').config();
-
-// Configuración del transportador de Nodemailer con Brevo (SMTP Relay)
-const transporreCorreo = nodemailer.createTransport({
-  host: "smtp-relay.brevo.com",
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.EMAIL_USER, // Correo verificado como remitente en Brevo
-    pass: process.env.EMAIL_PASS  // API Key SMTP de Brevo
-  },
-  connectionTimeout: 30000
-});
 
 // Helper para autenticarse con la API de PayPal Sandbox
 const obtenerPaypalAccessToken = async () => {
@@ -353,43 +341,41 @@ pedidoRoute.put(
       // 5. Enviar el PIN de entrega al comprador (solo tras el pago confirmado)
       const comprador = await Usuario.findByPk(compradorId);
       if (comprador) {
-        const opcionesCorreo = {
-          from: `"UTJ Marketplace" <${process.env.EMAIL_FROM}>`,
-          to: comprador.correo,
-          subject: `🔑 PIN de Entrega para tu compra: ${producto.titulo}`,
-          html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
-              <h2 style="color: #2c3e50; text-align: center;">¡Tu pago ha sido confirmado!</h2>
-              <p>Hola <strong>${comprador.nombre}</strong>,</p>
-              <p>Tu pago por el siguiente artículo en el marketplace de la UTJ fue confirmado y los fondos están en garantía:</p>
+        const htmlCorreo = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+            <h2 style="color: #2c3e50; text-align: center;">¡Tu pago ha sido confirmado!</h2>
+            <p>Hola <strong>${comprador.nombre}</strong>,</p>
+            <p>Tu pago por el siguiente artículo en el marketplace de la UTJ fue confirmado y los fondos están en garantía:</p>
 
-              <div style="background-color: #f9f9f9; padding: 15px; border-left: 5px solid #3498db; margin: 20px 0;">
-                <h3 style="margin-top: 0; color: #2980b9;">${producto.titulo}</h3>
-                <p style="margin: 5px 0;"><strong>Precio:</strong> $${producto.precio} MXN</p>
-              </div>
-
-              <p style="text-align: center; margin-top: 25px;">
-                <strong>IMPORTANTE:</strong> Reúnete con el vendedor en el campus para revisar el producto. Si estás conforme con la entrega, preséntale el siguiente PIN:
-              </p>
-
-              <div style="background-color: #e74c3c; color: white; text-align: center; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 5px; border-radius: 5px; margin: 20px 0;">
-                ${pedido.token_entrega}
-              </div>
-
-              <p style="font-size: 12px; color: #7f8c8d; text-align: center;">
-                * No compartas este PIN con nadie hasta que tengas el producto físicamente en tus manos y estés satisfecho.
-              </p>
+            <div style="background-color: #f9f9f9; padding: 15px; border-left: 5px solid #3498db; margin: 20px 0;">
+              <h3 style="margin-top: 0; color: #2980b9;">${producto.titulo}</h3>
+              <p style="margin: 5px 0;"><strong>Precio:</strong> $${producto.precio} MXN</p>
             </div>
-          `
-        };
 
-        transporreCorreo.sendMail(opcionesCorreo, (errorMail, info) => {
-          if (errorMail) {
-            console.error("Error no crítico al mandar el correo del PIN:", errorMail);
-          } else {
-            console.log("Correo con PIN enviado exitosamente: " + info.response);
-          }
-        });
+            <p style="text-align: center; margin-top: 25px;">
+              <strong>IMPORTANTE:</strong> Reúnete con el vendedor en el campus para revisar el producto. Si estás conforme con la entrega, preséntale el siguiente PIN:
+            </p>
+
+            <div style="background-color: #e74c3c; color: white; text-align: center; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 5px; border-radius: 5px; margin: 20px 0;">
+              ${pedido.token_entrega}
+            </div>
+
+            <p style="font-size: 12px; color: #7f8c8d; text-align: center;">
+              * No compartas este PIN con nadie hasta que tengas el producto físicamente en tus manos y estés satisfecho.
+            </p>
+          </div>
+        `;
+
+        try {
+          await enviarCorreo({
+            to: comprador.correo,
+            subject: `🔑 PIN de Entrega para tu compra: ${producto.titulo}`,
+            html: htmlCorreo
+          });
+          console.log("Correo con PIN enviado exitosamente");
+        } catch (errorMail) {
+          console.error("Error no crítico al mandar el correo del PIN:", errorMail.message);
+        }
       }
 
       return res.status(200).json({

@@ -4,28 +4,16 @@ const usuarioRoute = express.Router();
 const AsyncHandler = require("express-async-handler");
 const { Usuario, Rol, sequelize } = require("../../models"); // Importación unificada desde tu index.js de modelos
 const bcrypt = require('bcryptjs');
-const nodemailer = require('nodemailer');
 require('dotenv').config();
 const generateToken = require("../../tokenGenerate"); // Tu generador de tokens JWT
 const { proteger } = require("../../middlewares/authMiddleware");
+const { enviarCorreo } = require("../../config/brevo");
 
 // Almacenamiento temporal en memoria para los códigos de verificación (correo -> { codigo, expiracion })
 // Nota: En producción esto se puede mover a Redis o a una tabla temporal en la base de datos
 const codigosTemporales = {};
 const normalizarCorreo = (valor) =>
     typeof valor === "string" ? valor.trim().toLowerCase() : "";
-
-// Configuración del transportador de Nodemailer con Brevo (SMTP Relay)
-const transporter = nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 465,
-    secure: true,
-    auth: {
-        user: process.env.EMAIL_USER, // Correo verificado como remitente en Brevo
-        pass: process.env.EMAIL_PASS  // API Key SMTP de Brevo
-    },
-    connectionTimeout: 30000
-});
 
 // ==========================================
 // 1. API PARA SOLICITAR CÓDIGO DE VERIFICACIÓN
@@ -68,26 +56,25 @@ usuarioRoute.post("/solicitar-codigo", AsyncHandler(async (req, res) => {
     };
 
     // Plantilla de correo para el estudiante
-    const mailOptions = {
-        from: `"UTVentas Soporte" <${process.env.EMAIL_FROM}>`,
-        to: correo,
-        subject: "Código de Verificación - UTVentas",
-        html: `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px;">
-                <h2 style="color: #17a987; text-align: center;">¡Bienvenido a UTVentas!</h2>
-                <p>Estás a un paso de unirte al marketplace exclusivo de la comunidad de la UTJ.</p>
-                <p>Usa el siguiente código para completar tu registro en la plataforma:</p>
-                <div style="background-color: #f8f9fa; border: 1px dashed #17a987; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; color: #333; margin: 20px 0; border-radius: 4px;">
-                    ${codigoVerificacion}
-                </div>
-                <p style="font-size: 12px; color: #666; text-align: center;">Este código expirará en 10 minutos.</p>
+    const htmlCorreo = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px;">
+            <h2 style="color: #17a987; text-align: center;">¡Bienvenido a UTVentas!</h2>
+            <p>Estás a un paso de unirte al marketplace exclusivo de la comunidad de la UTJ.</p>
+            <p>Usa el siguiente código para completar tu registro en la plataforma:</p>
+            <div style="background-color: #f8f9fa; border: 1px dashed #17a987; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; color: #333; margin: 20px 0; border-radius: 4px;">
+                ${codigoVerificacion}
             </div>
-        `
-    };
+            <p style="font-size: 12px; color: #666; text-align: center;">Este código expirará en 10 minutos.</p>
+        </div>
+    `;
 
     // Enviar el correo electrónico
     try {
-        await transporter.sendMail(mailOptions);
+        await enviarCorreo({
+            to: correo,
+            subject: "Código de Verificación - UTVentas",
+            html: htmlCorreo
+        });
         res.status(200).json({
             success: true,
             message: "Código de verificación enviado con éxito a tu correo de la UTJ"
