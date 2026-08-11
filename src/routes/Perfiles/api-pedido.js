@@ -302,7 +302,8 @@ pedidoRoute.put(
         const estadoAnterior = pedidoExistente.estado;
         await pedidoExistente.update({
           estado: "pagado_escrow",
-          paypal_capture_id: authorizationId
+          paypal_capture_id: authorizationId,
+          comprador_id: pedidoExistente.comprador_id ?? compradorId
         }, { transaction });
         pedido = pedidoExistente;
       } else {
