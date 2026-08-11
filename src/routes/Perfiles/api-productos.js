@@ -132,6 +132,30 @@ productoRoute.get(
 );
 
 // =========================================================================
+// 1.6 LISTADO DE CATEGORÍAS PÚBLICO (GET /api/productos/categorias)
+// =========================================================================
+// Permite a la página principal mostrar las categorías gestionadas por el
+// administrador (crear/editar/eliminar desde Moderación de Contenido).
+// =========================================================================
+productoRoute.get(
+  "/categorias",
+  AsyncHandler(async (req, res) => {
+    try {
+      const categorias = await Categoria.findAll({
+        order: [["nombre", "ASC"]]
+      });
+      return res.status(200).json({
+        success: true,
+        data: categorias
+      });
+    } catch (error) {
+      console.error("Error al obtener las categorías:", error);
+      return res.status(500).json({ success: false, message: "Error interno del servidor" });
+    }
+  })
+);
+
+// =========================================================================
 // 2. OBTENER DETALLE DE PRODUCTO POR ID (GET /api/productos/:id)
 // =========================================================================
 productoRoute.get(
