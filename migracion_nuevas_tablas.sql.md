@@ -75,3 +75,9 @@ CREATE TABLE IF NOT EXISTS historico_pedidos (
   FOREIGN KEY (pedido_id) REFERENCES pedidos(pedido_id) ON DELETE SET NULL
 );
 ```
+
+## 6) Agregar columna motivo_suspension a productos (comentario del admin)
+
+```sql
+ALTER TABLE productos ADD COLUMN motivo_suspension TEXT NULL AFTER suspendido;
+```

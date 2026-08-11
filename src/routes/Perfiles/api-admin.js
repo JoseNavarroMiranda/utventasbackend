@@ -555,7 +555,7 @@ adminRoute.put("/disputas/:disputa_id/resolver",
         // para que vuelva a estar disponible para otro comprador.
         if (pedido.producto_id) {
           await Producto.update(
-            { es_activo: false, suspendido: true },
+            { es_activo: false, suspendido: true, motivo_suspension: resolucion_texto.trim() },
             { where: { producto_id: pedido.producto_id }, transaction }
           );
         }
@@ -991,7 +991,7 @@ adminRoute.put("/relanzamientos/:solicitud_id/revisar",
 
         if (solicitud.producto_id) {
           await Producto.update(
-            { es_activo: true, suspendido: false },
+            { es_activo: true, suspendido: false, motivo_suspension: null },
             { where: { producto_id: solicitud.producto_id }, transaction }
           );
         }
@@ -1016,6 +1016,132 @@ adminRoute.put("/relanzamientos/:solicitud_id/revisar",
       console.error("Error al revisar solicitud de relanzamiento:", error);
       return res.status(500).json({ success: false, message: "Error interno al procesar la revisión." });
     }
+  })
+);
+
+// =========================================================================
+// 9. LISTAR TODOS LOS PRODUCTOS (GET /api/admin/productos)
+// =========================================================================
+// Permite al administrador ver todas las publicaciones del marketplace
+// (con vendedor, categoría e imágenes) para moderación de contenido.
+// =========================================================================
+adminRoute.get("/productos",
+  proteger,
+  verificarRol(["Administrador"]),
+  AsyncHandler(async (req, res) => {
+    const productos = await Producto.findAll({
+      include: [
+        {
+          model: Usuario,
+          attributes: ["usuario_id", "nombre", "correo", "telefono_defecto"]
+        },
+        {
+          model: Categoria,
+          as: "Categoria",
+          attributes: ["categoria_id", "nombre"]
+        },
+        {
+          model: ProductoImagen,
+          attributes: ["imagen_id", "url_imagen", "es_principal"]
+        }
+      ],
+      order: [["fecha_publicacion", "DESC"]]
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: productos.length,
+      data: productos
+    });
+  })
+);
+
+// =========================================================================
+// 10. SUSPENDER PUBLICACIÓN (PUT /api/admin/productos/:producto_id/suspender)
+// =========================================================================
+// Misma lógica que cuando se resuelve una disputa con reembolso: la
+// publicación se desactiva y queda suspendida; el vendedor deberá solicitar
+// su relanzamiento. Se guarda el motivo del admin para mostrarlo al vendedor.
+// =========================================================================
+adminRoute.put("/productos/:producto_id/suspender",
+  proteger,
+  verificarRol(["Administrador"]),
+  AsyncHandler(async (req, res) => {
+    const { producto_id } = req.params;
+    const { motivo } = req.body;
+
+    if (!motivo || motivo.trim() === "") {
+      return res.status(400).json({
+        success: false,
+        message: "Debes escribir el motivo por el cual se suspende la publicación."
+      });
+    }
+
+    const producto = await Producto.findByPk(producto_id);
+    if (!producto) {
+      return res.status(404).json({
+        success: false,
+        message: "La publicación que deseas suspender no existe."
+      });
+    }
+    if (producto.suspendido) {
+      return res.status(400).json({
+        success: false,
+        message: "Esta publicación ya se encuentra suspendida."
+      });
+    }
+
+    await producto.update({
+      es_activo: false,
+      suspendido: true,
+      motivo_suspension: motivo.trim()
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Publicación suspendida. El vendedor deberá solicitar su relanzamiento.",
+      data: producto
+    });
+  })
+);
+
+// =========================================================================
+// 11. LEVANTAR SUSPENSIÓN DE PUBLICACIÓN (PUT /api/admin/productos/:producto_id/activar)
+// =========================================================================
+// Permite al admin reactivar directamente una publicación suspendida sin
+// pasar por el flujo de relanzamiento (borra el motivo de la suspensión).
+// =========================================================================
+adminRoute.put("/productos/:producto_id/activar",
+  proteger,
+  verificarRol(["Administrador"]),
+  AsyncHandler(async (req, res) => {
+    const { producto_id } = req.params;
+
+    const producto = await Producto.findByPk(producto_id);
+    if (!producto) {
+      return res.status(404).json({
+        success: false,
+        message: "La publicación no existe."
+      });
+    }
+    if (!producto.suspendido) {
+      return res.status(400).json({
+        success: false,
+        message: "Esta publicación no está suspendida."
+      });
+    }
+
+    await producto.update({
+      es_activo: true,
+      suspendido: false,
+      motivo_suspension: null
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Publicación reactivada correctamente.",
+      data: producto
+    });
   })
 );
 

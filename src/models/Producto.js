@@ -36,6 +36,10 @@ module.exports = (sequelize) => {
       type: DataTypes.BOOLEAN,
       defaultValue: false
     },
+    motivo_suspension: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
     contacto_telefono: {
       type: DataTypes.STRING(20),
       allowNull: false
